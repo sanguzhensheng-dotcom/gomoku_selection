@@ -1,0 +1,1014 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>量子五目並べ - QUANTUM GOMOKU</title>
+  
+  <meta name="theme-color" content="#0d1422">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+    }
+    html, body {
+      width: 100%;
+      height: 100%;
+      background-color: #080c16;
+      overflow: hidden;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      touch-action: none;
+    }
+    #game-container {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+      max-width: 500px;
+      max-height: 820px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+    canvas {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      touch-action: none;
+    }
+  </style>
+</head>
+<body>
+
+<div id="game-container">
+  <canvas id="canvas" width="500" height="820"></canvas>
+</div>
+
+<script>
+let audioCtx = null;
+function initAudio() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+}
+
+function playTone(freq, duration, type='triangle', gainVal=0.3) {
+  if (!audioCtx) return;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+  gain.gain.setValueAtTime(gainVal, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + duration);
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+  osc.start();
+  osc.stop(audioCtx.currentTime + duration);
+}
+
+function playNoiseSE() {
+  if (!audioCtx) return;
+  const bufferSize = audioCtx.sampleRate * 0.2;
+  const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+  const noise = audioCtx.createBufferSource();
+  noise.buffer = buffer;
+  const gain = audioCtx.createGain();
+  gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.2);
+  noise.connect(gain);
+  gain.connect(audioCtx.destination);
+  noise.start();
+}
+
+function playPlaceSE() { playTone(320, 0.15, 'triangle', 0.4); }
+function playObserveStartSE() { playNoiseSE(); playTone(220, 0.4, 'triangle', 0.5); }
+function playGlitchSE() { playTone(250 + Math.random() * 1250, 0.05, 'sine', 0.1); }
+function playHoverSE() { playTone(1450, 0.03, 'sine', 0.05); }
+function playClickSE() { playTone(520, 0.1, 'triangle', 0.25); }
+function playVictoryFanfare() {
+  const notes = [523.25, 659.25, 783.99, 1046.50, 1318.51];
+  notes.forEach((n, i) => setTimeout(() => playTone(n, 0.35, 'sine', 0.4), i * 130));
+}
+
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+const COLS = 10, ROWS = 10;
+const CANVAS_W = 500, CANVAS_H = 820;
+const BOARD_X = 25, BOARD_Y = 170, BOARD_SIZE = 450;
+const CELL_SIZE = BOARD_SIZE / COLS;
+
+const MODE_1P = 0, MODE_2P = 1;
+let gameMode = MODE_1P;
+
+const STATE_TITLE = 0, STATE_PLACE = 1, STATE_CHOICE = 2;
+const STATE_ANIMATING = 3, STATE_SHOW_RESULT = 4, STATE_OBSERVED_WAIT = 7;
+const STATE_WIN_LINE = 5, STATE_GAME_OVER = 6;
+const STATE_FADE_OUT_RESULT = 8;
+
+let gameState = STATE_TITLE;
+let showRules = false;
+
+let boardProb = Array.from({length: COLS}, () => Array(ROWS).fill(-1.0));
+let boardObserved = Array.from({length: COLS}, () => Array(ROWS).fill(0));
+
+let currentPlayer = 1;
+let p1Step = 0, p2Step = 0;
+
+const MAX_ENERGY = 3, COOLDOWN_TURNS = 3;
+let p1Energy = MAX_ENERGY, p2Energy = MAX_ENERGY;
+let p1Cooldown = 0, p2Cooldown = 0;
+
+let currentProb = 0.90;
+let winner = 0;
+let p1LineCount = 0, p2LineCount = 0;
+
+let animTimer = 0; const ANIM_DURATION = 55;
+let resultTimer = 0; const RESULT_DURATION = 80;
+let fadeTimer = 0; const FADE_DURATION = 30;
+let aiTimer = 0, aiDelay = 80;
+let observedWaitTimer = 0; const OBSERVED_WAIT_DURATION = 75;
+let winLineTimer = 0; const WIN_LINE_DURATION = 100;
+
+let winLines = [];
+let particles = [], titleSparkles = [], boardParticles = [], ripples = [], confettis = [];
+let flashAlpha = 0;
+
+let mouseX = -1, mouseY = -1;
+let prevHoverStates = {};
+
+for (let i = 0; i < 35; i++) particles.push(createTitleParticle());
+for (let i = 0; i < 50; i++) titleSparkles.push(createTitleSparkle());
+for (let i = 0; i < 35; i++) boardParticles.push(createBoardParticle());
+
+function resetGame() {
+  for (let i = 0; i < COLS; i++) {
+    for (let j = 0; j < ROWS; j++) {
+      boardProb[i][j] = -1.0;
+      boardObserved[i][j] = 0;
+    }
+  }
+  currentPlayer = 1; p1Step = 0; p2Step = 0;
+  p1Energy = MAX_ENERGY; p2Energy = MAX_ENERGY;
+  p1Cooldown = 0; p2Cooldown = 0;
+  winner = 0; p1LineCount = 0; p2LineCount = 0;
+  aiTimer = 0; winLines = []; ripples = []; confettis = [];
+  updateCurrentProb();
+  aiDelay = Math.floor(70 + Math.random() * 40);
+}
+
+function updateCurrentProb() {
+  if (currentPlayer === 1) currentProb = (p1Step === 0) ? 0.90 : 0.70;
+  else currentProb = (p2Step === 0) ? 0.10 : 0.30;
+}
+
+function getCurrentPlayerEnergy() { return (currentPlayer === 1) ? p1Energy : p2Energy; }
+function getCurrentPlayerCooldown() { return (currentPlayer === 1) ? p1Cooldown : p2Cooldown; }
+
+function createTitleParticle() {
+  const pList = [0.90, 0.70, 0.30, 0.10];
+  return {
+    x: Math.random() * CANVAS_W, y: Math.random() * CANVAS_H,
+    vx: (Math.random() - 0.5) * 0.6, vy: -(0.15 + Math.random() * 0.45),
+    size: 25 + Math.random() * 20, prob: pList[Math.floor(Math.random() * pList.length)],
+    rotAngle: Math.random() * Math.PI * 2, rotSpeed: (Math.random() - 0.5) * 0.06
+  };
+}
+function createTitleSparkle() {
+  return {
+    x: Math.random() * CANVAS_W, y: Math.random() * CANVAS_H,
+    vx: (Math.random() - 0.5) * 0.4, vy: -(0.1 + Math.random() * 0.4),
+    size: 2 + Math.random() * 3, baseAlpha: 100 + Math.random() * 120, alpha: 100
+  };
+}
+function createBoardParticle() {
+  return {
+    x: BOARD_X + Math.random() * BOARD_SIZE, y: BOARD_Y + Math.random() * BOARD_SIZE,
+    vx: (Math.random() - 0.5) * 0.4, vy: (Math.random() - 0.5) * 0.4,
+    size: 2 + Math.random() * 2.5, alpha: 40 + Math.random() * 80
+  };
+}
+function triggerConfetti() {
+  confettis = [];
+  for (let i = 0; i < 80; i++) {
+    const p1 = ['#2878dc', '#00c8ff', '#ffc800'], p2 = ['#dc4646', '#ffb400', '#ffffff'];
+    const c = (winner === 1) ? p1[Math.floor(Math.random()*3)] : p2[Math.floor(Math.random()*3)];
+    confettis.push({
+      x: Math.random() * CANVAS_W, y: -20 - Math.random() * 30,
+      vx: (Math.random() - 0.5) * 3, vy: 2 + Math.random() * 3,
+      size: 8 + Math.random() * 6, angle: Math.random() * Math.PI * 2,
+      rotSpeed: (Math.random() - 0.5) * 0.2, color: c
+    });
+  }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+
+  if (gameState === STATE_TITLE) {
+    drawTitleScreen();
+    requestAnimationFrame(draw);
+    return;
+  }
+
+  ctx.fillStyle = '#0a0f1d';
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  if (gameMode === MODE_1P && currentPlayer === 2) handleAiTurn();
+
+  if (gameState === STATE_ANIMATING) {
+    animTimer++;
+    if (animTimer % 4 === 0) playGlitchSE();
+    if (animTimer >= ANIM_DURATION) finishObservationAnimation();
+  }
+  if (gameState === STATE_OBSERVED_WAIT) {
+    observedWaitTimer++;
+    if (observedWaitTimer >= OBSERVED_WAIT_DURATION) {
+      gameState = STATE_WIN_LINE; winLineTimer = 0;
+    }
+  }
+  if (gameState === STATE_WIN_LINE) {
+    winLineTimer++;
+    if (winLineTimer >= WIN_LINE_DURATION) {
+      gameState = STATE_GAME_OVER;
+      if (winner !== 0) triggerConfetti();
+      playVictoryFanfare();
+    }
+  }
+  if (gameState === STATE_SHOW_RESULT) {
+    resultTimer++;
+    if (resultTimer >= RESULT_DURATION) startResultFadeOut();
+  }
+  if (gameState === STATE_FADE_OUT_RESULT) {
+    fadeTimer++;
+    if (fadeTimer >= FADE_DURATION) finishTurn();
+  }
+
+  drawHeaderAndStatus();
+  drawBoard();
+  drawStones();
+  drawHoverGuide();
+  updateAndDrawRipples();
+  drawBottomPanel();
+
+  if (flashAlpha > 0) {
+    ctx.fillStyle = `rgba(0, 220, 255, ${flashAlpha / 255 * 0.4})`;
+    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+    flashAlpha -= 12;
+  }
+
+  if (gameState === STATE_GAME_OVER) {
+    updateAndDrawConfetti();
+    drawVictoryModal();
+  }
+
+  requestAnimationFrame(draw);
+}
+
+function drawHeaderAndStatus() {
+  ctx.fillStyle = '#111827';
+  ctx.fillRect(0, 0, CANVAS_W, 50);
+  ctx.fillStyle = '#e0e7ff';
+  ctx.font = 'bold 18px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('QUANTUM GOMOKU', CANVAS_W / 2, 25);
+
+  drawButton('top_back', 10, 6, 120, 38, '‹ タイトル', '#334155', '#475569', 14);
+
+  const turnColor = (currentPlayer === 1) ? '#2878dc' : '#dc4646';
+  ctx.fillStyle = turnColor;
+  ctx.beginPath(); ctx.roundRect(15, 60, 470, 36, 6); ctx.fill();
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 15px sans-serif';
+  const turnStr = (currentPlayer === 1) ? "P1 (黒) のターン" : ((gameMode === MODE_1P) ? "AI (白) のターン" : "P2 (白) のターン");
+  ctx.fillText(turnStr, CANVAS_W / 2, 78);
+
+  ctx.fillStyle = '#1a2333';
+  ctx.beginPath(); ctx.roundRect(15, 102, 230, 58, 8); ctx.fill();
+  ctx.strokeStyle = '#2d3b54'; ctx.lineWidth = 1; ctx.stroke();
+
+  ctx.fillStyle = lerpColor('#fafdff', '#141414', currentProb);
+  ctx.beginPath(); ctx.arc(45, 131, 20, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#000000'; ctx.lineWidth = 1.5; ctx.stroke();
+
+  ctx.fillStyle = currentProb >= 0.5 ? '#ffffff' : '#000000';
+  ctx.font = 'bold 12px sans-serif';
+  ctx.fillText(`${Math.round(currentProb * 100)}%`, 45, 131);
+
+  ctx.fillStyle = '#b4c8e6';
+  ctx.font = '12px sans-serif'; ctx.textAlign = 'left';
+  ctx.fillText('出現確率', 75, 131);
+
+  ctx.fillStyle = '#1a2333';
+  ctx.beginPath(); ctx.roundRect(255, 102, 230, 58, 8); ctx.fill();
+  ctx.strokeStyle = '#2d3b54'; ctx.stroke();
+
+  ctx.fillStyle = '#b4c8e6'; ctx.textAlign = 'center';
+  ctx.fillText('観測エネルギー', 370, 118);
+
+  const curEnergy = getCurrentPlayerEnergy();
+  const curCooldown = getCurrentPlayerCooldown();
+
+  if (curEnergy === 0) {
+    ctx.fillStyle = '#ff6464'; ctx.font = '11px sans-serif';
+    ctx.fillText(`冷却中 (あと ${curCooldown} ターン)`, 370, 140);
+  } else {
+    for (let i = 0; i < MAX_ENERGY; i++) {
+      const ex = 330 + i * 40; const ey = 140;
+      ctx.beginPath(); ctx.arc(ex, ey, 7, 0, Math.PI * 2);
+      if (i < curEnergy) {
+        ctx.fillStyle = '#00dcff'; ctx.fill();
+        ctx.strokeStyle = '#ffffff'; ctx.stroke();
+      } else {
+        ctx.strokeStyle = '#647896'; ctx.lineWidth = 1.5; ctx.stroke();
+      }
+    }
+  }
+}
+
+function drawBoard() {
+  let bgCol = '#1a2536', lineCol = 'rgba(0, 180, 230, 0.6)';
+  if (gameState === STATE_SHOW_RESULT || gameState === STATE_OBSERVED_WAIT || gameState === STATE_WIN_LINE || gameState === STATE_GAME_OVER) {
+    bgCol = '#ebd2b4'; lineCol = 'rgba(60, 40, 20, 0.7)';
+  } else if (gameState === STATE_ANIMATING) {
+    const prog = animTimer / ANIM_DURATION;
+    bgCol = lerpColor('#1a2536', '#ebd2b4', prog);
+    lineCol = lerpColor('rgba(0, 180, 230, 0.6)', 'rgba(60, 40, 20, 0.7)', prog);
+  } else if (gameState === STATE_FADE_OUT_RESULT) {
+    const prog = fadeTimer / FADE_DURATION;
+    bgCol = lerpColor('#ebd2b4', '#1a2536', prog);
+    lineCol = lerpColor('rgba(60, 40, 20, 0.7)', 'rgba(0, 180, 230, 0.6)', prog);
+  }
+
+  ctx.fillStyle = bgCol;
+  ctx.fillRect(BOARD_X, BOARD_Y, BOARD_SIZE, BOARD_SIZE);
+
+  // 木目調（観測中・結果表示・判定中など）のときはボード上のパーティクルを非表示にする
+  const isWoodTheme = (gameState === STATE_SHOW_RESULT || gameState === STATE_OBSERVED_WAIT || gameState === STATE_WIN_LINE || gameState === STATE_GAME_OVER || gameState === STATE_ANIMATING);
+
+  if (!isWoodTheme) {
+    boardParticles.forEach(p => {
+      p.x += p.vx; p.y += p.vy;
+      if (p.x < BOARD_X || p.x > BOARD_X + BOARD_SIZE || p.y < BOARD_Y || p.y > BOARD_Y + BOARD_SIZE) {
+        Object.assign(p, createBoardParticle());
+      }
+      ctx.fillStyle = `rgba(0, 220, 255, ${p.alpha / 255})`;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2); ctx.fill();
+    });
+  }
+
+  ctx.strokeStyle = lineCol; ctx.lineWidth = 1;
+  for (let i = 0; i < COLS; i++) {
+    const cx = BOARD_X + i * CELL_SIZE + CELL_SIZE / 2;
+    ctx.beginPath(); ctx.moveTo(cx, BOARD_Y); ctx.lineTo(cx, BOARD_Y + BOARD_SIZE); ctx.stroke();
+  }
+  for (let j = 0; j < ROWS; j++) {
+    const cy = BOARD_Y + j * CELL_SIZE + CELL_SIZE / 2;
+    ctx.beginPath(); ctx.moveTo(BOARD_X, cy); ctx.lineTo(BOARD_X + BOARD_SIZE, cy); ctx.stroke();
+  }
+}
+
+function drawStones() {
+  const isFading = (gameState === STATE_FADE_OUT_RESULT);
+  const fadeAlphaVal = isFading ? (1 - fadeTimer / FADE_DURATION) : 1;
+
+  for (let i = 0; i < COLS; i++) {
+    for (let j = 0; j < ROWS; j++) {
+      const cx = BOARD_X + i * CELL_SIZE + CELL_SIZE / 2;
+      const cy = BOARD_Y + j * CELL_SIZE + CELL_SIZE / 2;
+
+      if (gameState === STATE_ANIMATING) {
+        if (boardProb[i][j] >= 0) {
+          const prog = animTimer / ANIM_DURATION;
+          
+          ctx.save();
+          const isDecided = (prog > 0.75);
+          
+          if (!isDecided) {
+            const glitchOffset = (Math.random() - 0.5) * 6;
+            const alphaVal = 0.4 + Math.sin(animTimer * 0.8 + i * j) * 0.4;
+            
+            ctx.shadowColor = '#00dcff';
+            ctx.shadowBlur = 12;
+            
+            ctx.strokeStyle = `rgba(0, 220, 255, ${alphaVal})`;
+            ctx.fillStyle = `rgba(0, 150, 255, ${alphaVal * 0.5})`;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(cx + glitchOffset, cy, CELL_SIZE * 0.38, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+
+            ctx.fillStyle = '#ffffff';
+            ctx.font = 'bold 11px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            const fakeNum = Math.floor(Math.random() * 100);
+            ctx.fillText(fakeNum + '%', cx, cy);
+
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.7)';
+            ctx.lineWidth = 1;
+            const scanY = cy + ((animTimer * 3 + i * 5) % (CELL_SIZE * 0.8)) - (CELL_SIZE * 0.4);
+            ctx.beginPath();
+            ctx.moveTo(cx - CELL_SIZE * 0.35, scanY);
+            ctx.lineTo(cx + CELL_SIZE * 0.35, scanY);
+            ctx.stroke();
+
+          } else {
+            const targetColor = (boardObserved[i][j] === 1) ? '#141414' : '#fafafa';
+            ctx.strokeStyle = '#000000'; ctx.lineWidth = 2;
+            ctx.fillStyle = targetColor;
+            ctx.shadowColor = '#00dcff';
+            ctx.shadowBlur = 15;
+            ctx.beginPath();
+            ctx.arc(cx, cy, CELL_SIZE * 0.38, 0, Math.PI * 2);
+            ctx.fill(); ctx.stroke();
+          }
+          ctx.restore();
+        }
+      } else if (gameState === STATE_SHOW_RESULT || gameState === STATE_OBSERVED_WAIT || gameState === STATE_WIN_LINE || gameState === STATE_GAME_OVER || isFading) {
+        if (boardObserved[i][j] !== 0) {
+          ctx.save();
+          if (isFading) ctx.globalAlpha = fadeAlphaVal;
+          ctx.strokeStyle = '#000000'; ctx.lineWidth = 2;
+          ctx.fillStyle = boardObserved[i][j] === 1 ? '#141414' : '#fafafa';
+          ctx.beginPath(); ctx.arc(cx, cy, CELL_SIZE * 0.38, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+          ctx.restore();
+        }
+        if (isFading && boardProb[i][j] >= 0) {
+          ctx.save();
+          ctx.globalAlpha = 1 - fadeAlphaVal;
+          ctx.strokeStyle = '#000000'; ctx.lineWidth = 2;
+          ctx.fillStyle = lerpColor('#fafafa', '#141414', boardProb[i][j]);
+          ctx.beginPath(); ctx.arc(cx, cy, CELL_SIZE * 0.38, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+          ctx.fillStyle = boardProb[i][j] >= 0.5 ? '#ffffff' : '#000000';
+          ctx.font = 'bold 11px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.fillText(Math.round(boardProb[i][j] * 100), cx, cy);
+          ctx.restore();
+        }
+      } else {
+        if (boardProb[i][j] >= 0) {
+          ctx.strokeStyle = '#000000'; ctx.lineWidth = 2;
+          ctx.fillStyle = lerpColor('#fafafa', '#141414', boardProb[i][j]);
+          ctx.beginPath(); ctx.arc(cx, cy, CELL_SIZE * 0.38, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+          ctx.fillStyle = boardProb[i][j] >= 0.5 ? '#ffffff' : '#000000';
+          ctx.font = 'bold 11px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.fillText(Math.round(boardProb[i][j] * 100), cx, cy);
+        }
+      }
+    }
+  }
+
+  if ((gameState === STATE_WIN_LINE || gameState === STATE_GAME_OVER) && winLines.length > 0) {
+    winLines.forEach((wl, idx) => {
+      ctx.strokeStyle = (wl.player === 1) ? 'rgba(255, 40, 40, 0.85)' : 'rgba(40, 120, 255, 0.85)';
+      ctx.lineWidth = 6;
+      const dx = wl.ex - wl.sx, dy = wl.ey - wl.sy;
+      const len = Math.hypot(dx, dy);
+      let nx = 0, ny = 0;
+      if (len > 0) { nx = -dy / len; ny = dx / len; }
+
+      const totalOffset = (idx - (winLines.length - 1) / 2) * 6;
+      const sx = (BOARD_X + wl.sx * CELL_SIZE + CELL_SIZE / 2) + nx * totalOffset;
+      const sy = (BOARD_Y + wl.sy * CELL_SIZE + CELL_SIZE / 2) + ny * totalOffset;
+      const ex = (BOARD_X + wl.ex * CELL_SIZE + CELL_SIZE / 2) + nx * totalOffset;
+      const ey = (BOARD_Y + wl.ey * CELL_SIZE + CELL_SIZE / 2) + ny * totalOffset;
+
+      ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey); ctx.stroke();
+    });
+  }
+}
+
+function drawHoverGuide() {
+  if (gameState !== STATE_PLACE || (gameMode === MODE_1P && currentPlayer === 2)) return;
+  if (mouseX < BOARD_X || mouseX >= BOARD_X + BOARD_SIZE || mouseY < BOARD_Y || mouseY >= BOARD_Y + BOARD_SIZE) return;
+
+  const gx = Math.floor((mouseX - BOARD_X) / CELL_SIZE);
+  const gy = Math.floor((mouseY - BOARD_Y) / CELL_SIZE);
+
+  if (gx >= 0 && gx < COLS && gy >= 0 && gy < ROWS && boardProb[gx][gy] < 0) {
+    const cx = BOARD_X + gx * CELL_SIZE + CELL_SIZE / 2;
+    const cy = BOARD_Y + gy * CELL_SIZE + CELL_SIZE / 2;
+    ctx.strokeStyle = 'rgba(0, 220, 255, 0.8)'; ctx.lineWidth = 2;
+    ctx.fillStyle = lerpColor('rgba(250, 250, 250, 0.6)', 'rgba(20, 20, 20, 0.6)', currentProb);
+    ctx.beginPath(); ctx.arc(cx, cy, CELL_SIZE * 0.38, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  }
+}
+
+function drawBottomPanel() {
+  const panelY = 635;
+  ctx.fillStyle = '#111827';
+  ctx.beginPath(); ctx.roundRect(15, panelY, 470, 170, 12); ctx.fill();
+  ctx.strokeStyle = '#2d3b54'; ctx.lineWidth = 1.5; ctx.stroke();
+
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+
+  if (gameState === STATE_PLACE || gameState === STATE_FADE_OUT_RESULT) {
+    ctx.fillStyle = (gameMode === MODE_1P && currentPlayer === 2) ? '#ffc800' : '#b4c8e6';
+    ctx.font = '15px sans-serif';
+    const msg = (gameMode === MODE_1P && currentPlayer === 2) ? "AIが思考中..." : "盤面をタップして石を配置";
+    ctx.fillText(msg, CANVAS_W / 2, panelY + 85);
+  } else if (gameState === STATE_CHOICE) {
+    ctx.fillStyle = '#00dcff'; ctx.font = 'bold 16px sans-serif';
+    ctx.fillText('【 量子観測 】', CANVAS_W / 2, panelY + 30);
+
+    if (gameMode === MODE_1P && currentPlayer === 2) {
+      ctx.fillStyle = '#ffc800'; ctx.font = '14px sans-serif';
+      ctx.fillText('AIが観測を検討中...', CANVAS_W / 2, panelY + 95);
+    } else {
+      ctx.fillStyle = '#e0e7ff'; ctx.font = '13px sans-serif';
+      ctx.fillText('量子状態を観測しますか？（エネルギー-1）', CANVAS_W / 2, panelY + 60);
+
+      drawButton('btn_observe', 65, panelY + 95, 160, 48, '▶ 観測する', '#1e8c5a', '#28d26e', 15);
+      drawButton('btn_skip', 275, panelY + 95, 160, 48, 'スキップ', '#4a5568', '#64748b', 15);
+    }
+  } else if (gameState === STATE_ANIMATING) {
+    ctx.fillStyle = '#00dcff'; ctx.font = 'bold 16px sans-serif';
+    ctx.fillText('⚡ QUANTUM SCANNING ⚡', CANVAS_W / 2, panelY + 85);
+  } else if (gameState === STATE_SHOW_RESULT) {
+    ctx.fillStyle = '#ffb400'; ctx.font = 'bold 16px sans-serif';
+    ctx.fillText('【 観測結果 】', CANVAS_W / 2, panelY + 35);
+    ctx.fillStyle = '#e0e7ff'; ctx.font = '14px sans-serif';
+    ctx.fillText('ラインが揃いませんでした (タップで次へ)', CANVAS_W / 2, panelY + 80);
+
+    const prog = resultTimer / RESULT_DURATION;
+    ctx.fillStyle = '#2d3748'; ctx.beginPath(); ctx.roundRect(100, panelY + 120, 300, 8, 4); ctx.fill();
+    ctx.fillStyle = '#00dcff'; ctx.beginPath(); ctx.roundRect(100, panelY + 120, 300 * prog, 8, 4); ctx.fill();
+  } else if (gameState === STATE_OBSERVED_WAIT) {
+    ctx.fillStyle = '#ffc800'; ctx.font = 'bold 16px sans-serif';
+    ctx.fillText('観測完了！判定中...', CANVAS_W / 2, panelY + 85);
+  } else if (gameState === STATE_WIN_LINE) {
+    ctx.fillStyle = '#ff5050'; ctx.font = 'bold 16px sans-serif';
+    ctx.fillText('決着！ライン確認中...', CANVAS_W / 2, panelY + 85);
+  }
+}
+
+function drawVictoryModal() {
+  ctx.fillStyle = 'rgba(8, 12, 22, 0.85)';
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  const mW = 380, mH = 260;
+  const mX = (CANVAS_W - mW) / 2, mY = (CANVAS_H - mH) / 2;
+
+  ctx.fillStyle = '#111827'; ctx.beginPath(); ctx.roundRect(mX, mY, mW, mH, 14); ctx.fill();
+  ctx.strokeStyle = '#00dcff'; ctx.lineWidth = 2; ctx.stroke();
+
+  ctx.fillStyle = '#ffc800'; ctx.font = 'bold 22px sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText(winner === 0 ? "★ DRAW (引き分け) ★" : "★ VICTORY! ★", CANVAS_W / 2, mY + 45);
+
+  ctx.fillStyle = '#ffffff'; ctx.font = '16px sans-serif';
+  let wText = "";
+  if (winner === 1) wText = "PLAYER 1 (黒) の勝利！";
+  else if (winner === 2) wText = (gameMode === MODE_1P) ? "AI (白) の勝利！" : "PLAYER 2 (白) の勝利！";
+  else wText = "同時に同数のラインが完成！";
+  ctx.fillText(wText, CANVAS_W / 2, mY + 90);
+
+  ctx.fillStyle = '#b4c8e6'; ctx.font = '13px sans-serif';
+  ctx.fillText(`【成立数】 黒: ${p1LineCount} 本 / 白: ${p2LineCount} 本`, CANVAS_W / 2, mY + 130);
+
+  drawButton('modal_retry', mX + 30, mY + 175, 150, 46, 'RETRY (再戦)', '#1e8c5a', '#28d26e', 14);
+  drawButton('modal_title', mX + 200, mY + 175, 150, 46, 'TITLE (タイトル)', '#3b82f6', '#60a5fa', 14);
+}
+
+function drawButton(id, x, y, w, h, label, bg, hoverBg, fontSize=14) {
+  const disableHoverSound = showRules && (id !== 'rules_close');
+  const isHover = isMouseOver(x, y, w, h);
+
+  if (isHover && !prevHoverStates[id] && !disableHoverSound) {
+    playHoverSE();
+  }
+  prevHoverStates[id] = isHover;
+
+  ctx.fillStyle = isHover ? hoverBg : bg;
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)'; ctx.lineWidth = isHover ? 2 : 1;
+  ctx.beginPath(); ctx.roundRect(x, y, w, h, 8); ctx.fill(); ctx.stroke();
+
+  ctx.fillStyle = '#ffffff';
+  ctx.font = `bold ${fontSize}px sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(label, x + w / 2, y + h / 2);
+}
+
+function isMouseOver(x, y, w, h) {
+  const pad = 2;
+  return mouseX >= x - pad && mouseX <= x + w + pad && mouseY >= y - pad && mouseY <= y + h + pad;
+}
+
+function drawTitleScreen() {
+  ctx.fillStyle = '#080c16'; ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  ctx.strokeStyle = 'rgba(0, 180, 255, 0.1)'; ctx.lineWidth = 1;
+  const gridOffset = (Date.now() * 0.03) % 40;
+  for (let x = gridOffset; x < CANVAS_W; x += 40) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, CANVAS_H); ctx.stroke(); }
+  for (let y = gridOffset; y < CANVAS_H; y += 40) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(CANVAS_W, y); ctx.stroke(); }
+
+  titleSparkles.forEach(s => {
+    s.x += s.vx; s.y += s.vy;
+    s.alpha = s.baseAlpha + Math.sin(Date.now() * 0.005 + s.x) * 40;
+    if (s.y < -10) Object.assign(s, createTitleSparkle(), {y: CANVAS_H + 10});
+    ctx.fillStyle = `rgba(0, 200, 255, ${s.alpha / 255})`;
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.size, 0, Math.PI * 2); ctx.fill();
+  });
+
+  particles.forEach(p => {
+    p.x += p.vx; p.y += p.vy; p.rotAngle += p.rotSpeed;
+    if (p.y < -50) Object.assign(p, createTitleParticle(), {y: CANVAS_H + 50});
+    ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.rotAngle);
+    ctx.strokeStyle = 'rgba(0, 180, 255, 0.4)'; ctx.lineWidth = 1.5;
+    ctx.fillStyle = lerpColor('rgba(250, 250, 250, 0.6)', 'rgba(10, 10, 10, 0.6)', p.prob);
+    ctx.beginPath(); ctx.ellipse(0, 0, Math.max(1, p.size * Math.abs(Math.cos(p.rotAngle * 0.5))), p.size, 0, 0, Math.PI * 2);
+    ctx.fill(); ctx.stroke(); ctx.restore();
+  });
+
+  const floatY = Math.sin(Date.now() * 0.003) * 8;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold 44px sans-serif';
+  for (let i = 6; i > 0; i--) {
+    ctx.fillStyle = `rgba(0, 150, 255, ${0.06 * i})`;
+    ctx.fillText("量子五目並べ", CANVAS_W / 2, 190 + floatY);
+  }
+  ctx.fillStyle = '#ffffff'; ctx.fillText("量子五目並べ", CANVAS_W / 2, 190 + floatY);
+
+  ctx.font = '12px sans-serif'; ctx.fillStyle = '#78d2ff';
+  ctx.fillText("— QUANTUM GOMOKU : SUPERPOSITION —", CANVAS_W / 2, 245 + floatY);
+
+  const bW = 320, bX = (CANVAS_W - bW) / 2;
+  drawButton('title_1p', bX, 350, bW, 58, '▶ 1 PLAYER (vs AI)', '#006eb4', '#00b4f0', 16);
+  drawButton('title_2p', bX, 425, bW, 58, '⚔️ 2 PLAYERS (対戦)', '#1e8250', '#32be6e', 16);
+  drawButton('title_rules', bX, 500, bW, 50, '? ルール説明', '#374151', '#4b5563', 14);
+
+  ctx.fillStyle = '#64748b'; ctx.font = '11px sans-serif';
+  ctx.fillText("© 2026 QUANTUM GOMOKU PROJECT", CANVAS_W / 2, CANVAS_H - 40);
+
+  if (showRules) drawRulesModal();
+}
+
+function drawRulesModal() {
+  ctx.fillStyle = 'rgba(8, 12, 22, 0.88)';
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  const mW = 440, mH = 380;
+  const mX = (CANVAS_W - mW) / 2, mY = (CANVAS_H - mH) / 2;
+
+  ctx.fillStyle = '#111827'; ctx.beginPath(); ctx.roundRect(mX, mY, mW, mH, 12); ctx.fill();
+  ctx.strokeStyle = '#00dcff'; ctx.lineWidth = 2; ctx.stroke();
+
+  ctx.fillStyle = '#e0e7ff'; ctx.font = 'bold 18px sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText('【 ルール説明 】', CANVAS_W / 2, mY + 35);
+
+  ctx.font = '12px sans-serif'; ctx.fillStyle = '#b4c8e6'; ctx.textAlign = 'left';
+  const lines = [
+    "・黒(P1)は 90%/70%、白(P2)は 10%/30% の確率石を設置",
+    "・石が5個以上並ぶと『観測』を行うことができます",
+    "・観測には【観測エネルギー】（最大3）を 1 消費",
+    "・3回使い切ると【冷却モード】に入り 3ターン観測不可",
+    "・観測により量子状態が確定し、5連の成立を判定します",
+    "・両者同時に揃った場合は【成立ライン数が多い方】の勝利！",
+    "・ライン数が同数の場合は【引き分け(DRAW)】となります"
+  ];
+  lines.forEach((l, i) => ctx.fillText(l, mX + 20, mY + 75 + i * 28));
+
+  drawButton('rules_close', CANVAS_W / 2 - 60, mY + mH - 45, 120, 34, '閉じる', '#4b5563', '#6b7280', 13);
+}
+
+function hasFiveInARowLine() {
+  const dx = [1, 0, 1, 1], dy = [0, 1, 1, -1];
+  for (let x = 0; x < COLS; x++) {
+    for (let y = 0; y < ROWS; y++) {
+      if (boardProb[x][y] < 0) continue;
+      for (let dir = 0; dir < 4; dir++) {
+        let count = 0;
+        for (let step = 0; step < 5; step++) {
+          const nx = x + dx[dir] * step, ny = y + dy[dir] * step;
+          if (nx >= 0 && nx < COLS && ny >= 0 && ny < ROWS && boardProb[nx][ny] >= 0) count++;
+          else break;
+        }
+        if (count === 5) return true;
+      }
+    }
+  }
+  return false;
+}
+
+function handleAiTurn() {
+  if (gameState === STATE_PLACE) {
+    aiTimer++;
+    if (aiTimer >= aiDelay) {
+      executeAiPlace(); aiTimer = 0; aiDelay = 70 + Math.random() * 40;
+    }
+  } else if (gameState === STATE_CHOICE) {
+    aiTimer++;
+    if (aiTimer >= aiDelay) {
+      if (aiShouldObserve()) startObservationAnimation();
+      else finishTurn();
+      aiTimer = 0; aiDelay = 70 + Math.random() * 40;
+    }
+  }
+}
+
+function executeAiPlace() {
+  let bestScore = -99999, bestX = -1, bestY = -1;
+  for (let x = 0; x < COLS; x++) {
+    for (let y = 0; y < ROWS; y++) {
+      if (boardProb[x][y] < 0) {
+        const score = evaluateCellForAI(x, y);
+        if (score > bestScore) { bestScore = score; bestX = x; bestY = y; }
+      }
+    }
+  }
+  if (bestX >= 0 && bestY >= 0) {
+    boardProb[bestX][bestY] = currentProb;
+    ripples.push({
+      x: BOARD_X + bestX * CELL_SIZE + CELL_SIZE / 2,
+      y: BOARD_Y + bestY * CELL_SIZE + CELL_SIZE / 2,
+      r: 10, alpha: 255
+    });
+    playPlaceSE();
+    if (hasFiveInARowLine() && getCurrentPlayerEnergy() >= 1) gameState = STATE_CHOICE;
+    else finishTurn();
+  }
+}
+
+function evaluateCellForAI(x, y) {
+  let score = (10 - Math.hypot(x - COLS/2, y - ROWS/2)) * 2;
+  const dx = [1, 0, 1, 1], dy = [0, 1, 1, -1];
+  for (let dir = 0; dir < 4; dir++) {
+    let whiteCount = 1, blackCount = 1;
+    for (let side = -1; side <= 1; side += 2) {
+      for (let step = 1; step <= 4; step++) {
+        const nx = x + dx[dir] * step * side, ny = y + dy[dir] * step * side;
+        if (nx >= 0 && nx < COLS && ny >= 0 && ny < ROWS) {
+          if (boardProb[nx][ny] >= 0) {
+            if (boardProb[nx][ny] < 0.5) whiteCount++;
+            if (boardProb[nx][ny] > 0.5) blackCount++;
+          } else break;
+        } else break;
+      }
+    }
+    if (whiteCount >= 5) score += 10000; else if (whiteCount === 4) score += 1200;
+    if (blackCount >= 5) score += 8000; else if (blackCount === 4) score += 1000;
+  }
+  return score + Math.random() * 5;
+}
+
+function aiShouldObserve() {
+  if (getCurrentPlayerEnergy() < 1) return false;
+  const maxWhiteWinProb = getMaxLineProb(2);
+  const maxBlackWinProb = getMaxLineProb(1);
+
+  let stoneCount = 0;
+  for (let i = 0; i < COLS; i++)
+    for (let j = 0; j < ROWS; j++) if (boardProb[i][j] >= 0) stoneCount++;
+
+  if (stoneCount >= 6 && Math.random() < 0.12) return true;
+  if (maxWhiteWinProb >= 0.10 && Math.random() < Math.min(1.0, maxWhiteWinProb * 2)) return true;
+  if (maxBlackWinProb >= 0.25 && Math.random() < 0.60) return true;
+  return false;
+}
+
+function getMaxLineProb(player) {
+  let maxProb = 0;
+  const dx = [1, 0, 1, 1], dy = [0, 1, 1, -1];
+  for (let x = 0; x < COLS; x++) {
+    for (let y = 0; y < ROWS; y++) {
+      for (let dir = 0; dir < 4; dir++) {
+        let lineProb = 1.0, count = 0;
+        for (let step = 0; step < 5; step++) {
+          const cx = x + dx[dir] * step, cy = y + dy[dir] * step;
+          if (cx >= 0 && cx < COLS && cy >= 0 && cy < ROWS && boardProb[cx][cy] >= 0) {
+            lineProb *= (player === 1) ? boardProb[cx][cy] : (1.0 - boardProb[cx][cy]);
+            count++;
+          } else { lineProb = 0; break; }
+        }
+        if (count === 5 && lineProb > maxProb) maxProb = lineProb;
+      }
+    }
+  }
+  return maxProb;
+}
+
+function startObservationAnimation() {
+  if (currentPlayer === 1) {
+    p1Energy = Math.max(0, p1Energy - 1);
+    if (p1Energy === 0) p1Cooldown = COOLDOWN_TURNS;
+  } else {
+    p2Energy = Math.max(0, p2Energy - 1);
+    if (p2Energy === 0) p2Cooldown = COOLDOWN_TURNS;
+  }
+
+  playObserveStartSE(); flashAlpha = 220;
+
+  for (let i = 0; i < COLS; i++) {
+    for (let j = 0; j < ROWS; j++) {
+      if (boardProb[i][j] >= 0) boardObserved[i][j] = (Math.random() < boardProb[i][j]) ? 1 : 2;
+      else boardObserved[i][j] = 0;
+    }
+  }
+  animTimer = 0; gameState = STATE_ANIMATING;
+}
+
+function finishObservationAnimation() {
+  winLines = [];
+  p1LineCount = countAndRecordFiveInARow(1);
+  p2LineCount = countAndRecordFiveInARow(2);
+
+  if (p1LineCount > 0 || p2LineCount > 0) {
+    if (p1LineCount > p2LineCount) winner = 1;
+    else if (p2LineCount > p1LineCount) winner = 2;
+    else winner = 0;
+    observedWaitTimer = 0; gameState = STATE_OBSERVED_WAIT;
+  } else {
+    resultTimer = 0; gameState = STATE_SHOW_RESULT;
+  }
+}
+
+function startResultFadeOut() {
+  fadeTimer = 0;
+  gameState = STATE_FADE_OUT_RESULT;
+}
+
+function finishTurn() {
+  for (let i = 0; i < COLS; i++)
+    for (let j = 0; j < ROWS; j++) boardObserved[i][j] = 0;
+
+  if (currentPlayer === 1) { p1Step = (p1Step + 1) % 2; currentPlayer = 2; }
+  else { p2Step = (p2Step + 1) % 2; currentPlayer = 1; }
+
+  if (currentPlayer === 1) {
+    if (p1Energy === 0 && --p1Cooldown <= 0) { p1Energy = MAX_ENERGY; p1Cooldown = 0; }
+  } else {
+    if (p2Energy === 0 && --p2Cooldown <= 0) { p2Energy = MAX_ENERGY; p2Cooldown = 0; }
+  }
+
+  updateCurrentProb(); gameState = STATE_PLACE; aiTimer = 0;
+  aiDelay = 70 + Math.random() * 40;
+}
+
+function countAndRecordFiveInARow(player) {
+  const dx = [1, 0, 1, 1], dy = [0, 1, 1, -1];
+  let count = 0;
+  for (let x = 0; x < COLS; x++) {
+    for (let y = 0; y < ROWS; y++) {
+      if (boardObserved[x][y] !== player) continue;
+      for (let dir = 0; dir < 4; dir++) {
+        let length = 1;
+        for (let step = 1; step < 5; step++) {
+          const nx = x + dx[dir] * step, ny = y + dy[dir] * step;
+          if (nx >= 0 && nx < COLS && ny >= 0 && ny < ROWS && boardObserved[nx][ny] === player) length++;
+          else break;
+        }
+        if (length >= 5) {
+          count++; winLines.push({sx: x, sy: y, ex: x + dx[dir] * 4, ey: y + dy[dir] * 4, player});
+        }
+      }
+    }
+  }
+  return count;
+}
+
+function updateAndDrawRipples() {
+  for (let i = ripples.length - 1; i >= 0; i--) {
+    const r = ripples[i];
+    r.r += 2.5; r.alpha -= 12;
+    if (r.alpha <= 0) { ripples.splice(i, 1); continue; }
+    ctx.strokeStyle = `rgba(0, 220, 255, ${r.alpha / 255})`; ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.arc(r.x, r.y, r.r, 0, Math.PI * 2); ctx.stroke();
+  }
+}
+
+function updateAndDrawConfetti() {
+  for (let i = confettis.length - 1; i >= 0; i--) {
+    const c = confettis[i];
+    c.x += c.vx + Math.sin(Date.now() * 0.005); c.y += c.vy; c.angle += c.rotSpeed;
+    if (c.y > CANVAS_H + 20) { confettis.splice(i, 1); continue; }
+    ctx.save(); ctx.translate(c.x, c.y); ctx.rotate(c.angle);
+    ctx.fillStyle = c.color; ctx.fillRect(-c.size/2, -c.size/2, c.size, c.size * 0.6);
+    ctx.restore();
+  }
+}
+
+function lerpColor(a, b, amount) {
+  const parse = c => {
+    if (c.startsWith('#')) {
+      return [parseInt(c.slice(1, 3), 16), parseInt(c.slice(3, 5), 16), parseInt(c.slice(5, 7), 16), 1];
+    }
+    const m = c.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/);
+    return [parseInt(m[1]), parseInt(m[2]), parseInt(m[3]), m[4] !== undefined ? parseFloat(m[4]) : 1];
+  };
+  const ca = parse(a), cb = parse(b);
+  const r = Math.round(ca[0] + (cb[0] - ca[0]) * amount);
+  const g = Math.round(ca[1] + (cb[1] - ca[1]) * amount);
+  const bl = Math.round(ca[2] + (cb[2] - ca[2]) * amount);
+  const alp = ca[3] + (cb[3] - ca[3]) * amount;
+  return `rgba(${r}, ${g}, ${bl}, ${alp})`;
+}
+
+function updateInputPos(e) {
+  const rect = canvas.getBoundingClientRect();
+  const clientX = (e.touches && e.touches.length > 0) ? e.touches[0].clientX : e.clientX;
+  const clientY = (e.touches && e.touches.length > 0) ? e.touches[0].clientY : e.clientY;
+  if (clientX === undefined || clientY === undefined) return;
+
+  const scaleX = CANVAS_W / rect.width;
+  const scaleY = CANVAS_H / rect.height;
+  mouseX = (clientX - rect.left) * scaleX;
+  mouseY = (clientY - rect.top) * scaleY;
+}
+
+function handlePointerDown(e) {
+  if (e.cancelable) e.preventDefault();
+  initAudio();
+  updateInputPos(e);
+
+  if (gameState === STATE_TITLE) {
+    if (showRules) {
+      const mW = 440, mH = 380, mX = (CANVAS_W - mW) / 2, mY = (CANVAS_H - mH) / 2;
+      if (isMouseOver(CANVAS_W / 2 - 60, mY + mH - 45, 120, 34) || !isMouseOver(mX, mY, mW, mH)) {
+        playClickSE(); showRules = false;
+      }
+      return;
+    }
+    const bW = 320, bX = (CANVAS_W - bW) / 2;
+    if (isMouseOver(bX, 350, bW, 58)) {
+      playClickSE(); gameMode = MODE_1P; resetGame(); gameState = STATE_PLACE;
+    } else if (isMouseOver(bX, 425, bW, 58)) {
+      playClickSE(); gameMode = MODE_2P; resetGame(); gameState = STATE_PLACE;
+    } else if (isMouseOver(bX, 500, bW, 50)) {
+      playClickSE(); showRules = true;
+    }
+    return;
+  }
+
+  if (isMouseOver(10, 6, 120, 38)) {
+    playClickSE(); gameState = STATE_TITLE; return;
+  }
+
+  if (gameState === STATE_ANIMATING || gameState === STATE_OBSERVED_WAIT || gameState === STATE_WIN_LINE || gameState === STATE_FADE_OUT_RESULT) return;
+
+  if (gameState === STATE_SHOW_RESULT) {
+    playClickSE(); startResultFadeOut(); return;
+  }
+
+  if (gameState === STATE_GAME_OVER) {
+    const mW = 380, mH = 260, mX = (CANVAS_W - mW) / 2, mY = (CANVAS_H - mH) / 2;
+    if (isMouseOver(mX + 30, mY + 175, 150, 46)) {
+      playClickSE(); resetGame(); gameState = STATE_PLACE;
+    } else if (isMouseOver(mX + 200, mY + 175, 150, 46)) {
+      playClickSE(); gameState = STATE_TITLE;
+    }
+    return;
+  }
+
+  if (gameMode === MODE_1P && currentPlayer === 2) return;
+
+  const panelY = 635;
+  if (gameState === STATE_CHOICE) {
+    if (isMouseOver(65, panelY + 95, 160, 48)) {
+      playClickSE(); startObservationAnimation();
+    } else if (isMouseOver(275, panelY + 95, 160, 48)) {
+      playClickSE(); finishTurn();
+    }
+    return;
+  }
+
+  if (gameState === STATE_PLACE) {
+    const gx = Math.floor((mouseX - BOARD_X) / CELL_SIZE);
+    const gy = Math.floor((mouseY - BOARD_Y) / CELL_SIZE);
+    if (gx >= 0 && gx < COLS && gy >= 0 && gy < ROWS && mouseX >= BOARD_X && mouseX < BOARD_X + BOARD_SIZE) {
+      if (boardProb[gx][gy] < 0) {
+        boardProb[gx][gy] = currentProb;
+        ripples.push({
+          x: BOARD_X + gx * CELL_SIZE + CELL_SIZE / 2,
+          y: BOARD_Y + gy * CELL_SIZE + CELL_SIZE / 2,
+          r: 10, alpha: 255
+        });
+        playPlaceSE();
+        if (hasFiveInARowLine() && getCurrentPlayerEnergy() >= 1) gameState = STATE_CHOICE;
+        else finishTurn();
+      }
+    }
+  }
+}
+
+function handlePointerUp(e) {
+  mouseX = -1; mouseY = -1;
+}
+
+canvas.addEventListener('pointerdown', handlePointerDown, { passive: false });
+canvas.addEventListener('pointermove', updateInputPos, { passive: true });
+canvas.addEventListener('pointerup', handlePointerUp, { passive: true });
+canvas.addEventListener('pointerleave', handlePointerUp, { passive: true });
+
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>
