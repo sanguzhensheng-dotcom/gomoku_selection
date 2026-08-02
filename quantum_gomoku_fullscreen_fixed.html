@@ -1,0 +1,1880 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>五目並べセレクション (Quantum & Classic Gomoku)</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #0b0f19;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            font-family: sans-serif;
+            color: #fff;
+            overflow: hidden;
+        }
+        canvas {
+            box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+            border-radius: 4px;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+<canvas id="gameCanvas"></canvas>
+
+<script>
+// ----------------------------------------------------
+// 設定＆定数
+// ----------------------------------------------------
+const ENABLE_SOUND = true;
+
+const COLS = 10;
+const ROWS = 10;
+const CELL_SIZE = 55;
+const OFFSET_Y = 60;
+const SIDEBAR_WIDTH = 220;
+
+let WIDTH = 770;
+let HEIGHT = 610;
+
+// ゲームモード管理
+const MODE_QUANTUM_1P = 0; // 量子 1P vs AI
+const MODE_QUANTUM_2P = 1; // 量子 2P対戦
+const MODE_CLASSIC_1P = 2; // 通常 1P vs AI
+const MODE_CLASSIC_2P = 3; // 通常 2P対戦
+let gameMode = MODE_QUANTUM_1P;
+
+// 盤面データ
+let boardProb = Array(COLS).fill(0).map(() => Array(ROWS).fill(-1.0));
+let boardObserved = Array(COLS).fill(0).map(() => Array(ROWS).fill(0));
+let lastObserved = Array(COLS).fill(0).map(() => Array(ROWS).fill(0));
+
+// ゲーム状態
+const STATE_TITLE         = 0;
+const STATE_PLACE         = 1;
+const STATE_CHOICE        = 2;
+const STATE_ANIMATING     = 3;
+const STATE_SHOW_RESULT   = 4;
+const STATE_OBSERVED_WAIT = 7;
+const STATE_WIN_LINE      = 5;
+const STATE_GAME_OVER     = 6;
+
+let gameState = STATE_TITLE;
+let showRules = false;
+
+let currentPlayer = 1; // 1: 黒(P1), 2: 白(P2 / AI)
+let p1Step = 0;
+let p2Step = 0;
+
+const MAX_ENERGY = 3;
+const COOLDOWN_TURNS = 3;
+
+let p1Energy = MAX_ENERGY;
+let p2Energy = MAX_ENERGY;
+let p1Cooldown = 0;
+let p2Cooldown = 0;
+
+let currentProb = 0.90;
+let winner = 0;
+let p1LineCount = 0;
+let p2LineCount = 0;
+
+// アニメーション＆タイマー
+let animTimer = 0;
+const ANIM_DURATION = 50;
+let resultTimer = 0;
+const RESULT_DURATION = 80;
+
+let transitionTimer = 0;
+const TRANSITION_DURATION = 35;
+
+let aiTimer = 0;
+let aiDelay = 80;
+
+let observedWaitTimer = 0;
+const OBSERVED_WAIT_DURATION = 75;
+
+let winLineTimer = 0;
+const WIN_LINE_DURATION = 100;
+
+class WinLine {
+  constructor(sx, sy, ex, ey, player) {
+    this.sx = sx; this.sy = sy;
+    this.ex = ex; this.ey = ey;
+    this.player = player;
+  }
+}
+let winLines = [];
+
+let particles = [];
+let titleSparkles = [];
+let boardParticles = [];
+let ripples = [];
+let confettis = [];
+
+let flashAlpha = 0;
+
+// マウス座標
+let mouseX = 0;
+let mouseY = 0;
+let mouseClickedFlag = false;
+
+// サウンド (Web Audio API)
+let audioCtx = null;
+
+function initAudio() {
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+}
+
+function playPlaceSE() {
+  if (!ENABLE_SOUND) return;
+  initAudio();
+  try {
+    let osc = audioCtx.createOscillator();
+    let gain = audioCtx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(320, audioCtx.currentTime);
+    gain.gain.setValueAtTime(0.4, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.15);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + 0.15);
+  } catch(e) {}
+}
+
+function playObserveStartSE() {
+  if (!ENABLE_SOUND) return;
+  initAudio();
+  try {
+    // Noise + Triangle
+    let bufferSize = audioCtx.sampleRate * 0.3;
+    let buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+    let data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+      data[i] = Math.random() * 2 - 1;
+    }
+    let noise = audioCtx.createBufferSource();
+    noise.buffer = buffer;
+    let noiseGain = audioCtx.createGain();
+    noiseGain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+    noiseGain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.3);
+    noise.connect(noiseGain);
+    noiseGain.connect(audioCtx.destination);
+    noise.start();
+
+    let osc = audioCtx.createOscillator();
+    let gain = audioCtx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(220, audioCtx.currentTime);
+    gain.gain.setValueAtTime(0.5, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.5);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + 0.5);
+  } catch(e) {}
+}
+
+function playGlitchSE() {
+  if (!ENABLE_SOUND) return;
+  initAudio();
+  try {
+    let osc = audioCtx.createOscillator();
+    let gain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(250 + Math.random() * 1250, audioCtx.currentTime);
+    gain.gain.setValueAtTime(0.12, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.08);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + 0.08);
+  } catch(e) {}
+}
+
+function playHoverSE() {
+  if (!ENABLE_SOUND) return;
+  initAudio();
+  try {
+    let osc = audioCtx.createOscillator();
+    let gain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(1450, audioCtx.currentTime);
+    gain.gain.setValueAtTime(0.05, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.02);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + 0.02);
+  } catch(e) {}
+}
+
+function playClickSE() {
+  if (!ENABLE_SOUND) return;
+  initAudio();
+  try {
+    let osc = audioCtx.createOscillator();
+    let gain = audioCtx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(520, audioCtx.currentTime);
+    gain.gain.setValueAtTime(0.25, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.1);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + 0.1);
+  } catch(e) {}
+}
+
+function playVictoryFanfare() {
+  if (!ENABLE_SOUND) return;
+  initAudio();
+  const notes = [523.25, 659.25, 783.99, 1046.50, 1318.51];
+  notes.forEach((freq, idx) => {
+    setTimeout(() => {
+      try {
+        let osc = audioCtx.createOscillator();
+        let gain = audioCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+        gain.gain.setValueAtTime(0.5, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.35);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + 0.35);
+      } catch(e) {}
+    }, idx * 130);
+  });
+}
+
+// ホバー音制御用フラグ
+let prevTitleHover1 = false, prevTitleHover2 = false, prevTitleHover3 = false, prevTitleHover4 = false, prevTitleHover5 = false;
+let prevRulesCloseHover = false;
+let prevOverlayBtn1 = false, prevOverlayBtn2 = false;
+let prevModalBtn1 = false, prevModalBtn2 = false;
+let prevSidebarRetryHover = false, prevSidebarTitleHover = false;
+
+// クラス定義
+class TitleParticle {
+  constructor() {
+    this.x = Math.random() * WIDTH;
+    this.y = Math.random() * HEIGHT;
+    this.vx = (Math.random() - 0.5) * 0.6;
+    this.vy = -0.6 - Math.random() * 0.45;
+    this.size = 25 + Math.random() * 20;
+    const pList = [0.90, 0.70, 0.30, 0.10];
+    this.prob = pList[Math.floor(Math.random() * pList.length)];
+    this.rotAngle = Math.random() * Math.PI * 2;
+    this.rotSpeed = (Math.random() - 0.5) * 0.06;
+  }
+  update() {
+    this.x += this.vx;
+    this.y += this.vy;
+    this.rotAngle += this.rotSpeed;
+    if (this.y < -50) {
+      this.y = HEIGHT + 50;
+      this.x = Math.random() * WIDTH;
+    }
+  }
+  draw(ctx) {
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.rotate(this.rotAngle);
+    ctx.strokeStyle = 'rgba(0, 180, 255, 0.47)';
+    ctx.lineWidth = 1.5;
+    ctx.fillStyle = lerpColorHex('#fefefe', '#0a0a0a', this.prob) + '99';
+    ctx.beginPath();
+    ctx.ellipse(0, 0, (this.size * Math.abs(Math.cos(this.rotAngle * 0.5))) / 2, this.size / 2, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+class TitleSparkle {
+  constructor() {
+    this.x = Math.random() * WIDTH;
+    this.y = Math.random() * HEIGHT;
+    this.vx = (Math.random() - 0.5) * 0.4;
+    this.vy = -0.5 - Math.random() * 0.4;
+    this.size = 2 + Math.random() * 3;
+    this.baseAlpha = 100 + Math.random() * 120;
+    this.alpha = this.baseAlpha;
+  }
+  update(frameCount) {
+    this.x += this.vx;
+    this.y += this.vy;
+    this.alpha = this.baseAlpha + Math.sin(frameCount * 0.05 + this.x) * 40;
+    if (this.y < -10) {
+      this.y = HEIGHT + 10;
+      this.x = Math.random() * WIDTH;
+    }
+  }
+  draw(ctx) {
+    ctx.fillStyle = `rgba(0, 200, 255, ${Math.max(0, Math.min(1, this.alpha / 255))})`;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.size / 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+class BoardParticle {
+  constructor() {
+    this.reset();
+  }
+  reset() {
+    this.x = Math.random() * (COLS * CELL_SIZE);
+    this.y = OFFSET_Y + Math.random() * (ROWS * CELL_SIZE);
+    this.vx = (Math.random() - 0.5) * 0.4;
+    this.vy = (Math.random() - 0.5) * 0.6;
+    this.size = 2 + Math.random() * 2.5;
+    this.alpha = 40 + Math.random() * 80;
+  }
+  update() {
+    this.x += this.vx;
+    this.y += this.vy;
+    if (this.x < 0 || this.x > COLS * CELL_SIZE || this.y < OFFSET_Y || this.y > OFFSET_Y + ROWS * CELL_SIZE) {
+      this.reset();
+    }
+  }
+  draw(ctx, factor = 1.0) {
+    ctx.fillStyle = `rgba(0, 220, 255, ${(this.alpha * factor) / 255})`;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.size / 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+class Ripple {
+  constructor(x, y) {
+    this.x = x;
+    this.y = y;
+    this.r = 10;
+    this.alpha = 255;
+  }
+  update() {
+    this.r += 2.5;
+    this.alpha -= 12;
+  }
+  draw(ctx) {
+    if (this.alpha <= 0) return;
+    ctx.strokeStyle = `rgba(0, 220, 255, ${Math.max(0, this.alpha / 255)})`;
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.r, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  isDead() {
+    return this.alpha <= 0;
+  }
+}
+
+class Confetti {
+  constructor(winner) {
+    this.x = Math.random() * (COLS * CELL_SIZE);
+    this.y = -50 - Math.random() * 50;
+    this.vx = (Math.random() - 0.5) * 3;
+    this.vy = 2.0 + Math.random() * 3.0;
+    this.size = 8 + Math.random() * 6;
+    this.angle = Math.random() * Math.PI * 2;
+    this.rotSpeed = (Math.random() - 0.5) * 0.2;
+    
+    const p1Colors = ['#2878de', '#00c8ff', '#ffc800'];
+    const p2Colors = ['#dc4646', '#ffb400', '#ffffff'];
+    const cols = (winner === 1) ? p1Colors : p2Colors;
+    this.color = cols[Math.floor(Math.random() * cols.length)];
+  }
+  update(frameCount) {
+    this.x += this.vx + Math.sin(frameCount * 0.05);
+    this.y += this.vy;
+    this.angle += this.rotSpeed;
+  }
+  draw(ctx) {
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.rotate(this.angle);
+    ctx.fillStyle = this.color;
+    ctx.fillRect(-this.size / 2, -(this.size * 0.6) / 2, this.size, this.size * 0.6);
+    ctx.restore();
+  }
+  isDead() {
+    return this.y > HEIGHT + 20;
+  }
+}
+
+// 初期化処理
+function setup() {
+  for (let i = 0; i < 35; i++) particles.push(new TitleParticle());
+  for (let i = 0; i < 50; i++) titleSparkles.push(new TitleSparkle());
+  for (let i = 0; i < 35; i++) boardParticles.push(new BoardParticle());
+  resetGame();
+}
+
+function resetGame() {
+  for (let i = 0; i < COLS; i++) {
+    for (let j = 0; j < ROWS; j++) {
+      boardProb[i][j] = -1.0;
+      boardObserved[i][j] = 0;
+      lastObserved[i][j] = 0;
+    }
+  }
+  currentPlayer = 1;
+  p1Step = 0;
+  p2Step = 0;
+  
+  p1Energy = MAX_ENERGY;
+  p2Energy = MAX_ENERGY;
+  p1Cooldown = 0;
+  p2Cooldown = 0;
+  
+  winner = 0;
+  p1LineCount = 0;
+  p2LineCount = 0;
+  aiTimer = 0;
+  transitionTimer = 0;
+  winLines = [];
+  ripples = [];
+  confettis = [];
+  updateCurrentProb();
+  setNewAiDelay();
+}
+
+function setNewAiDelay() {
+  aiDelay = Math.floor(Math.random() * 41) + 70; // 70~110
+}
+
+function updateCurrentProb() {
+  if (currentPlayer === 1) {
+    currentProb = (p1Step === 0) ? 0.90 : 0.70;
+  } else {
+    currentProb = (p2Step === 0) ? 0.10 : 0.30;
+  }
+}
+
+function getCurrentPlayerEnergy() {
+  return (currentPlayer === 1) ? p1Energy : p2Energy;
+}
+
+function getCurrentPlayerCooldown() {
+  return (currentPlayer === 1) ? p1Cooldown : p2Cooldown;
+}
+
+function isClassicMode() {
+  return gameMode === MODE_CLASSIC_1P || gameMode === MODE_CLASSIC_2P;
+}
+
+function isAiTurn() {
+  if (gameMode === MODE_QUANTUM_1P && currentPlayer === 2) return true;
+  if (gameMode === MODE_CLASSIC_1P && currentPlayer === 2) return true;
+  return false;
+}
+
+function isBoardFull() {
+  if (isClassicMode()) {
+    for (let i = 0; i < COLS; i++) {
+      for (let j = 0; j < ROWS; j++) {
+        if (boardObserved[i][j] === 0) return false;
+      }
+    }
+    return true;
+  } else {
+    for (let i = 0; i < COLS; i++) {
+      for (let j = 0; j < ROWS; j++) {
+        if (boardProb[i][j] < 0) return false;
+      }
+    }
+    return true;
+  }
+}
+
+// 判定ロジック
+function hasFiveInARowLine() {
+  const dx = [1, 0, 1, 1];
+  const dy = [0, 1, 1, -1];
+
+  if (isClassicMode()) {
+    for (let x = 0; x < COLS; x++) {
+      for (let y = 0; y < ROWS; y++) {
+        let player = boardObserved[x][y];
+        if (player === 0) continue;
+        for (let dir = 0; dir < 4; dir++) {
+          let count = 0;
+          for (let step = 0; step < 5; step++) {
+            let nx = x + dx[dir] * step;
+            let ny = y + dy[dir] * step;
+            if (nx >= 0 && nx < COLS && ny >= 0 && ny < ROWS && boardObserved[nx][ny] === player) {
+              count++;
+            } else break;
+          }
+          if (count >= 5) return true;
+        }
+      }
+    }
+    return false;
+  } else {
+    for (let x = 0; x < COLS; x++) {
+      for (let y = 0; y < ROWS; y++) {
+        if (boardProb[x][y] < 0) continue;
+        for (let dir = 0; dir < 4; dir++) {
+          let count = 0;
+          for (let step = 0; step < 5; step++) {
+            let nx = x + dx[dir] * step;
+            let ny = y + dy[dir] * step;
+            if (nx >= 0 && nx < COLS && ny >= 0 && ny < ROWS && boardProb[nx][ny] >= 0) {
+              count++;
+            } else break;
+          }
+          if (count === 5) return true;
+        }
+      }
+    }
+    return false;
+  }
+}
+
+function handleAiTurn() {
+  if (gameState === STATE_PLACE) {
+    aiTimer++;
+    if (aiTimer >= aiDelay) {
+      executeAiPlace();
+      aiTimer = 0;
+      setNewAiDelay();
+    }
+  } else if (gameState === STATE_CHOICE) {
+    aiTimer++;
+    if (aiTimer >= aiDelay) {
+      if (aiShouldObserve()) {
+        startObservationAnimation(true);
+      } else {
+        finishTurn();
+      }
+      aiTimer = 0;
+      setNewAiDelay();
+    }
+  }
+}
+
+function executeAiPlace() {
+  let bestScore = -999999;
+  let bestX = -1, bestY = -1;
+
+  for (let x = 0; x < COLS; x++) {
+    for (let y = 0; y < ROWS; y++) {
+      let isEmpty = isClassicMode() ? (boardObserved[x][y] === 0) : (boardProb[x][y] < 0);
+      if (isEmpty) {
+        let score = evaluateCellForAI(x, y);
+        if (score > bestScore) {
+          bestScore = score;
+          bestX = x;
+          bestY = y;
+        }
+      }
+    }
+  }
+
+  if (bestX >= 0 && bestY >= 0) {
+    if (isClassicMode()) {
+      boardObserved[bestX][bestY] = currentPlayer;
+      ripples.push(new Ripple(bestX * CELL_SIZE + CELL_SIZE/2.0, OFFSET_Y + bestY * CELL_SIZE + CELL_SIZE/2.0));
+      playPlaceSE();
+
+      if (hasFiveInARowLine()) {
+        winner = currentPlayer;
+        winLines = [];
+        countAndRecordFiveInARow(currentPlayer);
+        p2LineCount = 1;
+        gameState = STATE_WIN_LINE;
+        winLineTimer = 0;
+      } else if (isBoardFull()) {
+        winner = 0;
+        gameState = STATE_WIN_LINE;
+        winLineTimer = 0;
+      } else {
+        finishTurn();
+      }
+    } else {
+      boardProb[bestX][bestY] = currentProb;
+      ripples.push(new Ripple(bestX * CELL_SIZE + CELL_SIZE/2.0, OFFSET_Y + bestY * CELL_SIZE + CELL_SIZE/2.0));
+      playPlaceSE();
+
+      if (isBoardFull()) {
+        startObservationAnimation(false);
+      } else if (hasFiveInARowLine() && getCurrentPlayerEnergy() >= 1) {
+        gameState = STATE_CHOICE;
+      } else {
+        finishTurn();
+      }
+    }
+  }
+}
+
+function evaluateCellForAI(x, y) {
+  if (isClassicMode()) {
+    let score = (10.0 - Math.hypot(x - COLS/2.0, y - ROWS/2.0)) * 1.0;
+    let oppPlayer = (currentPlayer === 1) ? 2 : 1;
+    const dx = [1, 0, 1, 1];
+    const dy = [0, 1, 1, -1];
+
+    for (let dir = 0; dir < 4; dir++) {
+      score += evaluateLineDirection(x, y, currentPlayer, dx[dir], dy[dir]);
+      score += evaluateLineDirection(x, y, oppPlayer, dx[dir], dy[dir]) * 1.15;
+    }
+    return score + Math.random() * 2;
+  } else {
+    let score = (10.0 - Math.hypot(x - COLS/2.0, y - ROWS/2.0)) * 2.0;
+    const dx = [1, 0, 1, 1];
+    const dy = [0, 1, 1, -1];
+
+    for (let dir = 0; dir < 4; dir++) {
+      let whiteCount = 1, blackCount = 1;
+      for (let side = -1; side <= 1; side += 2) {
+        for (let step = 1; step <= 4; step++) {
+          let nx = x + dx[dir] * step * side;
+          let ny = y + dy[dir] * step * side;
+          if (nx >= 0 && nx < COLS && ny >= 0 && ny < ROWS) {
+            if (boardProb[nx][ny] >= 0) {
+              if (boardProb[nx][ny] < 0.5) whiteCount++;
+              if (boardProb[nx][ny] > 0.5) blackCount++;
+            } else break;
+          } else break;
+        }
+      }
+      if (whiteCount >= 5) score += 10000;
+      else if (whiteCount === 4) score += 1200;
+      if (blackCount >= 5) score += 8000;
+      else if (blackCount === 4) score += 1000;
+    }
+    return score + Math.random() * 5;
+  }
+}
+
+function evaluateLineDirection(x, y, player, dx, dy) {
+  let count = 1;
+  let openEnds = 0;
+
+  let step = 1;
+  while (step < 5) {
+    let nx = x + dx * step;
+    let ny = y + dy * step;
+    if (nx < 0 || nx >= COLS || ny < 0 || ny >= ROWS) break;
+    let p = boardObserved[nx][ny];
+    if (p === player) {
+      count++;
+    } else if (p === 0) {
+      openEnds++;
+      break;
+    } else break;
+    step++;
+  }
+
+  step = 1;
+  while (step < 5) {
+    let nx = x - dx * step;
+    let ny = y - dy * step;
+    if (nx < 0 || nx >= COLS || ny < 0 || ny >= ROWS) break;
+    let p = boardObserved[nx][ny];
+    if (p === player) {
+      count++;
+    } else if (p === 0) {
+      openEnds++;
+      break;
+    } else break;
+    step++;
+  }
+
+  if (count >= 5) return 100000;
+  if (count === 4 && openEnds >= 1) return 20000;
+  if (count === 3) {
+    if (openEnds === 2) return 3000;
+    if (openEnds === 1) return 800;
+  }
+  if (count === 2) {
+    if (openEnds === 2) return 300;
+    if (openEnds === 1) return 50;
+  }
+  return 10;
+}
+
+function aiShouldObserve() {
+  let myEnergy = getCurrentPlayerEnergy();
+  if (myEnergy < 1) return false;
+  if (isBoardFull()) return true;
+
+  let maxWhiteWinProb = getMaxLineProb(2);
+  let maxBlackWinProb = getMaxLineProb(1);
+
+  let stoneCount = 0;
+  for (let i = 0; i < COLS; i++) {
+    for (let j = 0; j < ROWS; j++) {
+      if (boardProb[i][j] >= 0) stoneCount++;
+    }
+  }
+  if (stoneCount >= 6 && Math.random() < 0.12) return true;
+
+  if (maxWhiteWinProb >= 0.10) {
+    let observeChance = Math.max(0.2, Math.min(1.0, maxWhiteWinProb * 2.0));
+    if (Math.random() < observeChance) return true;
+  }
+
+  if (maxBlackWinProb >= 0.25) {
+    if (Math.random() < 0.60) return true;
+  }
+
+  return false;
+}
+
+function getMaxLineProb(player) {
+  let maxProb = 0;
+  const dx = [1, 0, 1, 1];
+  const dy = [0, 1, 1, -1];
+
+  for (let x = 0; x < COLS; x++) {
+    for (let y = 0; y < ROWS; y++) {
+      for (let dir = 0; dir < 4; dir++) {
+        let lineProb = 1.0;
+        let count = 0;
+        for (let step = 0; step < 5; step++) {
+          let cx = x + dx[dir] * step;
+          let cy = y + dy[dir] * step;
+          if (cx >= 0 && cx < COLS && cy >= 0 && cy < ROWS && boardProb[cx][cy] >= 0) {
+            let stoneProb = (player === 1) ? boardProb[cx][cy] : (1.0 - boardProb[cx][cy]);
+            lineProb *= stoneProb;
+            count++;
+          } else {
+            lineProb = 0;
+            break;
+          }
+        }
+        if (count === 5 && lineProb > maxProb) {
+          maxProb = lineProb;
+        }
+      }
+    }
+  }
+  return maxProb;
+}
+
+function countAndRecordFiveInARow(player) {
+  const dx = [1, 0, 1, 1];
+  const dy = [0, 1, 1, -1];
+  let count = 0;
+
+  for (let x = 0; x < COLS; x++) {
+    for (let y = 0; y < ROWS; y++) {
+      if (boardObserved[x][y] !== player) continue;
+
+      for (let dir = 0; dir < 4; dir++) {
+        let length = 1;
+        for (let step = 1; step < 5; step++) {
+          let nx = x + dx[dir] * step;
+          let ny = y + dy[dir] * step;
+          if (nx >= 0 && nx < COLS && ny >= 0 && ny < ROWS && boardObserved[nx][ny] === player) {
+            length++;
+          } else break;
+        }
+        if (length >= 5) {
+          count++;
+          winLines.push(new WinLine(x, y, x + dx[dir] * 4, y + dy[dir] * 4, player));
+        }
+      }
+    }
+  }
+  return count;
+}
+
+function startObservationAnimation(consumeEnergy) {
+  if (consumeEnergy) {
+    if (currentPlayer === 1) {
+      p1Energy = Math.max(0, p1Energy - 1);
+      if (p1Energy === 0) p1Cooldown = COOLDOWN_TURNS;
+    } else {
+      p2Energy = Math.max(0, p2Energy - 1);
+      if (p2Energy === 0) p2Cooldown = COOLDOWN_TURNS;
+    }
+  }
+
+  playObserveStartSE();
+  flashAlpha = 180;
+
+  for (let i = 0; i < COLS; i++) {
+    for (let j = 0; j < ROWS; j++) {
+      if (boardProb[i][j] >= 0) {
+        boardObserved[i][j] = (Math.random() < boardProb[i][j]) ? 1 : 2;
+      } else {
+        boardObserved[i][j] = 0;
+      }
+    }
+  }
+  animTimer = 0;
+  gameState = STATE_ANIMATING;
+}
+
+function finishObservationAnimation() {
+  winLines = [];
+  p1LineCount = countAndRecordFiveInARow(1);
+  p2LineCount = countAndRecordFiveInARow(2);
+
+  if (p1LineCount > 0 || p2LineCount > 0) {
+    if (p1LineCount > p2LineCount) {
+      winner = 1;
+    } else if (p2LineCount > p1LineCount) {
+      winner = 2;
+    } else {
+      winner = 0;
+    }
+    observedWaitTimer = 0;
+    gameState = STATE_OBSERVED_WAIT;
+  } else {
+    if (isBoardFull()) {
+      winner = 0;
+    }
+    resultTimer = 0;
+    gameState = STATE_SHOW_RESULT;
+  }
+}
+
+function finishTurn() {
+  if (!isClassicMode() && gameState === STATE_SHOW_RESULT) {
+    for (let i = 0; i < COLS; i++) {
+      for (let j = 0; j < ROWS; j++) {
+        lastObserved[i][j] = boardObserved[i][j];
+      }
+    }
+    transitionTimer = TRANSITION_DURATION;
+  }
+
+  if (!isClassicMode()) {
+    for (let i = 0; i < COLS; i++) {
+      for (let j = 0; j < ROWS; j++) boardObserved[i][j] = 0;
+    }
+  }
+
+  if (currentPlayer === 1) {
+    p1Step = (p1Step + 1) % 2;
+    currentPlayer = 2;
+  } else {
+    p2Step = (p2Step + 1) % 2;
+    currentPlayer = 1;
+  }
+
+  if (!isClassicMode()) {
+    if (currentPlayer === 1) {
+      if (p1Energy === 0) {
+        p1Cooldown--;
+        if (p1Cooldown <= 0) {
+          p1Energy = MAX_ENERGY;
+          p1Cooldown = 0;
+        }
+      }
+    } else {
+      if (p2Energy === 0) {
+        p2Cooldown--;
+        if (p2Cooldown <= 0) {
+          p2Energy = MAX_ENERGY;
+          p2Cooldown = 0;
+        }
+      }
+    }
+    updateCurrentProb();
+  }
+
+  gameState = STATE_PLACE;
+  aiTimer = 0;
+  setNewAiDelay();
+}
+
+// ユーティリティカラー関数
+function lerpColorHex(c1, c2, factor) {
+  let col1 = parseInt(c1.replace('#',''), 16);
+  let col2 = parseInt(c2.replace('#',''), 16);
+  let r1 = (col1 >> 16) & 255, g1 = (col1 >> 8) & 255, b1 = col1 & 255;
+  let r2 = (col2 >> 16) & 255, g2 = (col2 >> 8) & 255, b2 = col2 & 255;
+  let r = Math.round(r1 + (r2 - r1) * factor);
+  let g = Math.round(g1 + (g2 - g1) * factor);
+  let b = Math.round(b1 + (b2 - b1) * factor);
+  return `rgb(${r},${g},${b})`;
+}
+
+function lerpColorRGB(r1, g1, b1, r2, g2, b2, factor) {
+  let r = Math.round(r1 + (r2 - r1) * factor);
+  let g = Math.round(g1 + (g2 - g1) * factor);
+  let b = Math.round(b1 + (b2 - b1) * factor);
+  return `rgb(${r},${g},${b})`;
+}
+
+function isMouseOver(x, y, w, h) {
+  return mouseX >= x && mouseX <= x + w && mouseY >= y && mouseY <= y + h;
+}
+
+// メインループ・描画
+let frameCount = 0;
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+const BASE_WIDTH = 770;
+const BASE_HEIGHT = 610;
+function resizeCanvas(){
+ const dpr=window.devicePixelRatio||1;
+ const scale=Math.min(window.innerWidth/BASE_WIDTH,window.innerHeight/BASE_HEIGHT);
+ const cssW=BASE_WIDTH*scale, cssH=BASE_HEIGHT*scale;
+ canvas.style.width=cssW+'px';
+ canvas.style.height=cssH+'px';
+ canvas.width=Math.round(cssW*dpr);
+ canvas.height=Math.round(cssH*dpr);
+ ctx.setTransform(scale*dpr,0,0,scale*dpr,0,0);
+}
+window.addEventListener('resize',resizeCanvas);
+resizeCanvas();
+
+canvas.addEventListener('mousemove', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  mouseX = (e.clientX - rect.left) * BASE_WIDTH / rect.width;
+  mouseY = (e.clientY - rect.top) * BASE_HEIGHT / rect.height;
+});
+
+canvas.addEventListener('click', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  mouseX = (e.clientX - rect.left) * BASE_WIDTH / rect.width;
+  mouseY = (e.clientY - rect.top) * BASE_HEIGHT / rect.height;
+  mouseClickedFlag = true;
+});
+
+function gameLoop() {
+  frameCount++;
+  
+  if (gameState === STATE_TITLE) {
+    drawTitleScreen();
+  } else {
+    updateAndDrawGame();
+  }
+
+  if (mouseClickedFlag) {
+    mouseClickedFlag = false;
+    handleMousePressed();
+  }
+
+  requestAnimationFrame(gameLoop);
+}
+
+function drawTitleScreen() {
+  // 背景グラデーション
+  let grad = ctx.createLinearGradient(0, 0, 0, HEIGHT);
+  grad.addColorStop(0, '#080c16');
+  grad.addColorStop(1, '#16233c');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+  // グリッド線
+  ctx.strokeStyle = 'rgba(0, 180, 255, 0.098)';
+  ctx.lineWidth = 1;
+  let gridOffset = (frameCount * 0.5) % 40;
+  for (let x = gridOffset; x < WIDTH; x += 40) {
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, HEIGHT); ctx.stroke();
+  }
+  for (let y = gridOffset; y < HEIGHT; y += 40) {
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(WIDTH, y); ctx.stroke();
+  }
+
+  titleSparkles.forEach(ts => { ts.update(frameCount); ts.draw(ctx); });
+  particles.forEach(p => { p.update(); p.draw(ctx); });
+
+  let floatY = Math.sin(frameCount * 0.035) * 8;
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = '42px sans-serif';
+  for (let i = 6; i > 0; i--) {
+    ctx.fillStyle = `rgba(0, 150, 255, ${0.15 * i})`;
+    ctx.fillText("五目並べセレクション", WIDTH / 2, 110 + floatY);
+  }
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText("五目並べセレクション", WIDTH / 2, 110 + floatY);
+
+  drawTitleButton(WIDTH / 2 - 135, 195, 270, 45, "🌀 量子 1P (vs AI)", '#006eb4', '#00b4f0', 1);
+  drawTitleButton(WIDTH / 2 - 135, 250, 270, 45, "🌀 量子 2P (対戦)", '#148264', '#28be82', 2);
+  drawTitleButton(WIDTH / 2 - 135, 320, 270, 45, "⚫ 通常 1P (vs AI)", '#78501e', '#b47832', 3);
+  drawTitleButton(WIDTH / 2 - 135, 375, 270, 45, "⚔️ 通常 2P (対戦)", '#823232', '#be5050', 4);
+  drawTitleButton(WIDTH / 2 - 135, 440, 270, 38, "?  ルールを見る", '#37415a', '#4b5a78', 5);
+
+  if (showRules) {
+    drawRulesModal();
+  }
+}
+
+function drawTitleButton(x, y, w, h, label, bg, hoverBg, btnId) {
+  let hover = isMouseOver(x, y, w, h) && !showRules;
+  let wasHover = false;
+  if (btnId === 1) wasHover = prevTitleHover1;
+  else if (btnId === 2) wasHover = prevTitleHover2;
+  else if (btnId === 3) wasHover = prevTitleHover3;
+  else if (btnId === 4) wasHover = prevTitleHover4;
+  else wasHover = prevTitleHover5;
+
+  if (hover && !wasHover) playHoverSE();
+
+  if (btnId === 1) prevTitleHover1 = hover;
+  else if (btnId === 2) prevTitleHover2 = hover;
+  else if (btnId === 3) prevTitleHover3 = hover;
+  else if (btnId === 4) prevTitleHover4 = hover;
+  else prevTitleHover5 = hover;
+
+  let scaleW = hover ? w + 8 : w;
+  let scaleH = hover ? h + 4 : h;
+  let scaleX = x - (scaleW - w) / 2;
+  let scaleY = y - (scaleH - h) / 2;
+
+  ctx.save();
+  if (hover) {
+    ctx.strokeStyle = hoverBg;
+    ctx.lineWidth = 4;
+    ctx.globalAlpha = 0.47;
+    roundRect(ctx, scaleX - 2, scaleY - 2, scaleW + 4, scaleH + 4, 22);
+    ctx.stroke();
+    ctx.globalAlpha = 1.0;
+  }
+
+  ctx.fillStyle = hover ? hoverBg : bg;
+  ctx.strokeStyle = hover ? '#ffffff' : 'rgba(255,255,255,0.7)';
+  ctx.lineWidth = hover ? 2 : 1;
+  roundRect(ctx, scaleX, scaleY, scaleW, scaleH, 18);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '13px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(label, x + w / 2, y + h / 2);
+  ctx.restore();
+}
+
+function drawRulesModal() {
+  ctx.fillStyle = 'rgba(10, 15, 25, 0.86)';
+  ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+  let modalW = 500, modalH = 380;
+  let modalX = (WIDTH - modalW) / 2.0;
+  let modalY = (HEIGHT - modalH) / 2.0;
+
+  ctx.fillStyle = '#141e32';
+  ctx.strokeStyle = '#00b4ff';
+  ctx.lineWidth = 2;
+  roundRect(ctx, modalX, modalY, modalW, modalH, 12);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = '#dcf0ff';
+  ctx.font = '18px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText("【 ルール説明 】", modalX + modalW / 2, modalY + 28);
+
+  ctx.font = '12px sans-serif';
+  ctx.fillStyle = '#bde4ff';
+  ctx.textAlign = 'left';
+  
+  let startY = modalY + 60;
+  let lineH = 24;
+  let rulesText = [
+    "【量子モード】",
+    "・黒(P1)は 90%/70%、白(P2)は 10%/30% の確率石を設置",
+    "・石が5個以上並ぶと『観測』を行うことができます",
+    "・観測には【観測エネルギー】（最大3）を 1 消費",
+    "・3回使い切ると【冷却モード】に入り 3ターン観測不可",
+    "・観測により量子状態が確定し、5連の成立を判定します",
+    "・両者同時に揃った場合は【成立ライン数が多い方】の勝利！",
+    "・ライン数が同数の場合は【引き分け(DRAW)】となります",
+    "・盤面が埋まったら決着がつくまで自動で観測を繰り返します",
+    "【通常モード】",
+    "・交互に石を1つずつ置いていくシンプルな五目並べ",
+    "・先に縦・横・斜めのいずれかに5つ並べた方の勝利"
+  ];
+
+  rulesText.forEach((txt, idx) => {
+    let indent = (idx >= 10 && idx <= 11) ? 35 : 25;
+    let offsetIdx = idx > 9 ? idx + 0.1 : idx;
+    ctx.fillText(txt, modalX + indent, startY + lineH * offsetIdx);
+  });
+
+  let btnX = modalX + modalW / 2 - 60;
+  let btnY = modalY + modalH - 35;
+  let hover = isMouseOver(btnX, btnY, 120, 30);
+  if (hover && !prevRulesCloseHover) playHoverSE();
+  prevRulesCloseHover = hover;
+
+  ctx.fillStyle = hover ? '#6e788c' : '#505a6e';
+  ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+  ctx.lineWidth = hover ? 2 : 1;
+  roundRect(ctx, btnX, btnY, 120, 30, 6);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '13px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText("閉じる", btnX + 60, btnY + 15);
+}
+
+function updateAndDrawGame() {
+  if (transitionTimer > 0) transitionTimer--;
+
+  drawBoard();
+
+  if (isAiTurn() && transitionTimer === 0 && gameState !== STATE_ANIMATING) {
+    handleAiTurn();
+  }
+
+  if (gameState === STATE_ANIMATING) {
+    animTimer++;
+    if (animTimer % 5 === 0) playGlitchSE();
+    if (animTimer >= ANIM_DURATION) finishObservationAnimation();
+  }
+
+  if (gameState === STATE_OBSERVED_WAIT) {
+    observedWaitTimer++;
+    if (observedWaitTimer >= OBSERVED_WAIT_DURATION) {
+      gameState = STATE_WIN_LINE;
+      winLineTimer = 0;
+    }
+  }
+
+  if (gameState === STATE_WIN_LINE) {
+    winLineTimer++;
+    if (winLineTimer >= WIN_LINE_DURATION) {
+      gameState = STATE_GAME_OVER;
+      if (winner !== 0) triggerConfetti();
+      playVictoryFanfare();
+    }
+  }
+
+  if (gameState === STATE_SHOW_RESULT) {
+    resultTimer++;
+    let threshold = isBoardFull() ? 15 : RESULT_DURATION;
+    if (resultTimer >= threshold) {
+      if (isBoardFull()) {
+        startObservationAnimation(false);
+      } else {
+        finishTurn();
+      }
+    }
+  }
+
+  drawStones();
+  updateAndDrawRipples();
+  drawHoverGuide();
+  drawTopHeader();
+  drawSidebar();
+
+  if (flashAlpha > 0) {
+    ctx.fillStyle = `rgba(255, 255, 255, ${flashAlpha / 255})`;
+    ctx.fillRect(0, 0, WIDTH, HEIGHT);
+    flashAlpha -= 15;
+  }
+
+  if (gameState === STATE_GAME_OVER) {
+    updateAndDrawConfetti();
+    drawVictoryModal();
+  }
+}
+
+function drawBoard() {
+  let bgCol, lineCol;
+
+  if (isClassicMode()) {
+    bgCol = '#ebbe78';
+    lineCol = 'rgba(60, 40, 20, 0.78)';
+  } else {
+    let isWoodState = (gameState === STATE_SHOW_RESULT || gameState === STATE_OBSERVED_WAIT || gameState === STATE_WIN_LINE || gameState === STATE_GAME_OVER);
+    bgCol = isWoodState ? '#ebbe78' : '#233044';
+    lineCol = isWoodState ? 'rgba(60, 40, 20, 0.78)' : 'rgba(0, 180, 230, 0.7)';
+
+    if (gameState === STATE_ANIMATING) {
+      let progress = animTimer / ANIM_DURATION;
+      bgCol = lerpColorRGB(35, 48, 68, 235, 190, 120, progress);
+      lineCol = lerpColorRGB(0, 180, 230, 60, 40, 20, progress); // approx
+      lineCol = 'rgba(60, 40, 20, 0.78)';
+    } else if (transitionTimer > 0) {
+      let progress = transitionTimer / TRANSITION_DURATION;
+      bgCol = lerpColorRGB(35, 48, 68, 235, 190, 120, progress);
+      lineCol = 'rgba(60, 40, 20, 0.78)';
+    }
+  }
+
+  ctx.fillStyle = bgCol;
+  ctx.fillRect(0, OFFSET_Y, COLS * CELL_SIZE, ROWS * CELL_SIZE);
+
+  if (!isClassicMode() && gameState !== STATE_ANIMATING && gameState !== STATE_OBSERVED_WAIT && gameState !== STATE_SHOW_RESULT) {
+    let ptFactor = (transitionTimer > 0) ? (1.0 - (transitionTimer / TRANSITION_DURATION)) : 1.0;
+    boardParticles.forEach(bp => {
+      bp.update();
+      bp.draw(ctx, ptFactor);
+    });
+  }
+
+  ctx.strokeStyle = lineCol;
+  ctx.lineWidth = 1;
+  for (let i = 0; i < COLS; i++) {
+    let cx = i * CELL_SIZE + CELL_SIZE / 2.0;
+    ctx.beginPath(); ctx.moveTo(cx, OFFSET_Y); ctx.lineTo(cx, OFFSET_Y + ROWS * CELL_SIZE); ctx.stroke();
+  }
+  for (let j = 0; j < ROWS; j++) {
+    let cy = OFFSET_Y + j * CELL_SIZE + CELL_SIZE / 2.0;
+    ctx.beginPath(); ctx.moveTo(0, cy); ctx.lineTo(COLS * CELL_SIZE, cy); ctx.stroke();
+  }
+}
+
+function drawHoverGuide() {
+  if (gameState !== STATE_PLACE || transitionTimer > 0 || isAiTurn()) return;
+
+  let sbX = COLS * CELL_SIZE;
+  if (mouseX < 0 || mouseX >= sbX || mouseY < OFFSET_Y || mouseY >= OFFSET_Y + ROWS * CELL_SIZE) return;
+
+  let gx = Math.floor(mouseX / CELL_SIZE);
+  let gy = Math.floor((mouseY - OFFSET_Y) / CELL_SIZE);
+
+  let isEmpty = isClassicMode() ? (boardObserved[gx][gy] === 0) : (boardProb[gx][gy] < 0);
+
+  if (gx >= 0 && gx < COLS && gy >= 0 && gy < ROWS && isEmpty) {
+    let cx = gx * CELL_SIZE + CELL_SIZE / 2.0;
+    let cy = OFFSET_Y + gy * CELL_SIZE + CELL_SIZE / 2.0;
+
+    ctx.strokeStyle = 'rgba(0, 220, 255, 0.78)';
+    ctx.lineWidth = 1.5;
+    let guideColHex = isClassicMode() ? (currentPlayer === 1 ? '#141414' : '#fafafa') : lerpColorHex('#fafafa', '#141414', currentProb);
+    
+    ctx.fillStyle = guideColHex;
+    ctx.globalAlpha = 0.63;
+    ctx.beginPath();
+    ctx.arc(cx, cy, (CELL_SIZE * 0.75) / 2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.globalAlpha = 1.0;
+  }
+}
+
+function drawStones() {
+  if (isClassicMode()) {
+    for (let i = 0; i < COLS; i++) {
+      for (let j = 0; j < ROWS; j++) {
+        if (boardObserved[i][j] !== 0) {
+          let cx = i * CELL_SIZE + CELL_SIZE / 2.0;
+          let cy = OFFSET_Y + j * CELL_SIZE + CELL_SIZE / 2.0;
+          ctx.strokeStyle = '#000000';
+          ctx.lineWidth = 2;
+          ctx.fillStyle = boardObserved[i][j] === 1 ? '#141414' : '#fafafa';
+          ctx.beginPath();
+          ctx.arc(cx, cy, (CELL_SIZE * 0.75) / 2, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+        }
+      }
+    }
+  } else {
+    for (let i = 0; i < COLS; i++) {
+      for (let j = 0; j < ROWS; j++) {
+        let cx = i * CELL_SIZE + CELL_SIZE / 2.0;
+        let cy = OFFSET_Y + j * CELL_SIZE + CELL_SIZE / 2.0;
+
+        if (gameState === STATE_ANIMATING) {
+          if (boardProb[i][j] >= 0) {
+            let progress = animTimer / ANIM_DURATION;
+            let finalColor = (boardObserved[i][j] === 1) ? '#141414' : '#fafafa';
+            let glitchIntensity = (1.0 - progress) * (1.0 - progress);
+
+            if (progress > 0.85) {
+              ctx.strokeStyle = '#000000';
+              ctx.lineWidth = 2;
+              ctx.fillStyle = finalColor;
+              ctx.beginPath();
+              ctx.arc(cx, cy, (CELL_SIZE * 0.75) / 2, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.stroke();
+            } else {
+              let probColorHex = lerpColorHex('#fafafa', '#141414', boardProb[i][j]);
+              let offsetX = (Math.random() * 6 - 3) * glitchIntensity;
+              let currentX = cx + offsetX;
+              let scanAlpha = 150 + Math.sin((cy + frameCount * 10) * 0.2) * 50 * glitchIntensity;
+
+              ctx.save();
+              ctx.translate(currentX, cy);
+
+              if (glitchIntensity > 0.1) {
+                ctx.fillStyle = `rgba(255, 40, 40, ${0.39 * glitchIntensity})`;
+                ctx.beginPath(); ctx.arc(-15 * glitchIntensity, 0, (CELL_SIZE * 0.75) / 2, 0, Math.PI * 2); ctx.fill();
+                ctx.fillStyle = `rgba(40, 255, 255, ${0.39 * glitchIntensity})`;
+                ctx.beginPath(); ctx.arc(15 * glitchIntensity, 0, (CELL_SIZE * 0.75) / 2, 0, Math.PI * 2); ctx.fill();
+              }
+
+              ctx.strokeStyle = 'rgba(0, 255, 255, 0.78)';
+              ctx.lineWidth = 1.5 + Math.random() * 1.5 * glitchIntensity;
+              ctx.fillStyle = probColorHex;
+              ctx.globalAlpha = scanAlpha / 255;
+              ctx.beginPath();
+              ctx.arc(0, 0, (CELL_SIZE * 0.75) / 2, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.stroke();
+              ctx.globalAlpha = 1.0;
+
+              if (Math.random() < 0.25) {
+                ctx.strokeStyle = `rgba(0, 255, 255, ${0.59 * glitchIntensity})`;
+                ctx.lineWidth = 1.5;
+                let lineY = (Math.random() - 0.5) * CELL_SIZE * 0.6;
+                ctx.beginPath(); ctx.moveTo(-CELL_SIZE * 0.5, lineY); ctx.lineTo(CELL_SIZE * 0.5, lineY); ctx.stroke();
+              }
+
+              ctx.restore();
+            }
+          }
+        } else if (gameState === STATE_SHOW_RESULT || gameState === STATE_OBSERVED_WAIT || gameState === STATE_WIN_LINE || gameState === STATE_GAME_OVER) {
+          if (boardObserved[i][j] !== 0) {
+            ctx.strokeStyle = '#000000';
+            ctx.lineWidth = 2;
+            ctx.fillStyle = boardObserved[i][j] === 1 ? '#141414' : '#fafafa';
+            ctx.beginPath();
+            ctx.arc(cx, cy, (CELL_SIZE * 0.75) / 2, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+          }
+        } else if (transitionTimer > 0 && lastObserved[i][j] !== 0) {
+          let transProgress = transitionTimer / TRANSITION_DURATION;
+
+          ctx.strokeStyle = `rgba(0, 0, 0, ${transProgress})`;
+          ctx.lineWidth = 2;
+          ctx.fillStyle = lastObserved[i][j] === 1 ? `rgba(20, 20, 20, ${transProgress})` : `rgba(250, 250, 250, ${transProgress})`;
+          ctx.beginPath(); ctx.arc(cx, cy, (CELL_SIZE * 0.75) / 2, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+          if (boardProb[i][j] >= 0) {
+            let probAlpha = 1.0 - transProgress;
+            ctx.strokeStyle = `rgba(0, 0, 0, ${probAlpha})`;
+            ctx.lineWidth = 2;
+            ctx.fillStyle = lerpColorHex('#fafafa', '#141414', boardProb[i][j]);
+            ctx.globalAlpha = probAlpha;
+            ctx.beginPath(); ctx.arc(cx, cy, (CELL_SIZE * 0.75) / 2, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+            ctx.fillStyle = boardProb[i][j] >= 0.5 ? '#ffffff' : '#000000';
+            ctx.font = '11px sans-serif';
+            ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            ctx.fillText(Math.floor(boardProb[i][j] * 100), cx, cy);
+            ctx.globalAlpha = 1.0;
+          }
+        } else {
+          if (boardProb[i][j] >= 0) {
+            ctx.strokeStyle = '#000000';
+            ctx.lineWidth = 2;
+            ctx.fillStyle = lerpColorHex('#fafafa', '#141414', boardProb[i][j]);
+            ctx.beginPath();
+            ctx.arc(cx, cy, (CELL_SIZE * 0.75) / 2, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+
+            ctx.fillStyle = boardProb[i][j] >= 0.5 ? '#ffffff' : '#000000';
+            ctx.font = '11px sans-serif';
+            ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            ctx.fillText(Math.floor(boardProb[i][j] * 100), cx, cy);
+          }
+        }
+      }
+    }
+  }
+
+  if ((gameState === STATE_WIN_LINE || gameState === STATE_GAME_OVER) && winLines.length > 0) {
+    winLines.forEach((wl, i) => {
+      ctx.strokeStyle = wl.player === 1 ? 'rgba(255, 40, 40, 0.86)' : 'rgba(40, 120, 255, 0.86)';
+      ctx.lineWidth = 6;
+
+      let dx = wl.ex - wl.sx;
+      let dy = wl.ey - wl.sy;
+      let len = Math.hypot(dx, dy);
+      let nx = 0, ny = 0;
+      if (len > 0) {
+        nx = -dy / len;
+        ny = dx / len;
+      }
+
+      let offsetStep = 6.0;
+      let totalOffset = (i - (winLines.length - 1) / 2.0) * offsetStep;
+
+      let sx = (wl.sx * CELL_SIZE + CELL_SIZE / 2.0) + nx * totalOffset;
+      let sy = (OFFSET_Y + wl.sy * CELL_SIZE + CELL_SIZE / 2.0) + ny * totalOffset;
+      let ex = (wl.ex * CELL_SIZE + CELL_SIZE / 2.0) + nx * totalOffset;
+      let ey = (OFFSET_Y + wl.ey * CELL_SIZE + CELL_SIZE / 2.0) + ny * totalOffset;
+
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.lineTo(ex, ey);
+      ctx.stroke();
+    });
+  }
+}
+
+function updateAndDrawRipples() {
+  for (let i = ripples.length - 1; i >= 0; i--) {
+    let r = ripples[i];
+    r.update(); r.draw(ctx);
+    if (r.isDead()) ripples.splice(i, 1);
+  }
+}
+
+function updateAndDrawConfetti() {
+  for (let i = confettis.length - 1; i >= 0; i--) {
+    let c = confettis[i];
+    c.update(frameCount); c.draw(ctx);
+    if (c.isDead()) confettis.splice(i, 1);
+  }
+}
+
+function drawSidebar() {
+  let sbX = COLS * CELL_SIZE;
+
+  ctx.fillStyle = '#192030';
+  ctx.fillRect(sbX, 0, SIDEBAR_WIDTH, HEIGHT);
+  ctx.strokeStyle = '#2d3750';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(sbX, 0); ctx.lineTo(sbX, HEIGHT); ctx.stroke();
+
+  ctx.fillStyle = currentPlayer === 1 ? '#2878de' : '#dc4646';
+  roundRect(ctx, sbX + 20, 15, 180, 36, 6);
+  ctx.fill();
+
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '14px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  let turnStr = "";
+  if (isClassicMode()) {
+    turnStr = (currentPlayer === 1) ? "P1 (黒) のターン" : ((gameMode === MODE_CLASSIC_1P) ? "AI (白) のターン" : "P2 (白) のターン");
+  } else {
+    turnStr = (currentPlayer === 1) ? "P1 (黒) のターン" : ((gameMode === MODE_QUANTUM_1P) ? "AI (白) のターン" : "P2 (白) のターン");
+  }
+  ctx.fillText(turnStr, sbX + SIDEBAR_WIDTH / 2, 33);
+
+  if (!isClassicMode()) {
+    ctx.fillStyle = '#232d41';
+    ctx.strokeStyle = '#3c4b69';
+    ctx.lineWidth = 1;
+    roundRect(ctx, sbX + 20, 60, 180, 120, 8);
+    ctx.fill(); ctx.stroke();
+
+    let stoneX = sbX + SIDEBAR_WIDTH / 2;
+    ctx.strokeStyle = '#000000'; ctx.lineWidth = 2;
+    ctx.fillStyle = lerpColorHex('#fafafa', '#141414', currentProb);
+    ctx.beginPath(); ctx.arc(stoneX, 105, 48 / 2, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+    ctx.fillStyle = currentProb >= 0.5 ? '#ffffff' : '#000000';
+    ctx.font = '14px sans-serif';
+    ctx.fillText(Math.floor(currentProb * 100) + "%", stoneX, 105);
+
+    ctx.fillStyle = '#b4c8e6';
+    ctx.font = '12px sans-serif';
+    ctx.fillText("黒の出現確率", stoneX, 155);
+
+    ctx.fillStyle = '#232d41';
+    ctx.strokeStyle = '#3c4b69';
+    ctx.lineWidth = 1;
+    roundRect(ctx, sbX + 20, 190, 180, 60, 8);
+    ctx.fill(); ctx.stroke();
+
+    ctx.fillStyle = '#b4c8e6';
+    ctx.font = '12px sans-serif';
+    ctx.fillText("観測エネルギー", sbX + SIDEBAR_WIDTH / 2, 206);
+
+    let curEnergy = getCurrentPlayerEnergy();
+    let curCooldown = getCurrentPlayerCooldown();
+
+    if (curEnergy === 0) {
+      ctx.fillStyle = '#ff6464';
+      ctx.font = '12px sans-serif';
+      ctx.fillText("冷却中 (あと " + curCooldown + " ターン)", sbX + SIDEBAR_WIDTH / 2, 232);
+    } else {
+      for (let i = 0; i < MAX_ENERGY; i++) {
+        let ex = sbX + 65 + i * 45;
+        let ey = 232;
+        if (i < curEnergy) {
+          ctx.fillStyle = '#00dcff';
+          ctx.strokeStyle = '#00ffff';
+          ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.arc(ex, ey, 14 / 2, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        } else {
+          ctx.strokeStyle = '#647896';
+          ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.arc(ex, ey, 14 / 2, 0, Math.PI * 2); ctx.stroke();
+        }
+      }
+    }
+  } else {
+    ctx.fillStyle = '#232d41';
+    ctx.strokeStyle = '#3c4b69';
+    ctx.lineWidth = 1;
+    roundRect(ctx, sbX + 20, 60, 180, 100, 8);
+    ctx.fill(); ctx.stroke();
+
+    ctx.fillStyle = '#b4c8e6';
+    ctx.font = '13px sans-serif';
+    ctx.fillText("【 通常五目並べ 】", sbX + SIDEBAR_WIDTH / 2, 90);
+    ctx.font = '12px sans-serif';
+    ctx.fillText("交互に石を置いていき", sbX + SIDEBAR_WIDTH / 2, 120);
+    ctx.fillText("5つ並べたら勝利！", sbX + SIDEBAR_WIDTH / 2, 140);
+  }
+
+  ctx.fillStyle = '#b4c8e6';
+  ctx.font = '13px sans-serif';
+  if (gameState === STATE_PLACE) {
+    if (transitionTimer > 0) {
+      ctx.fillStyle = '#8ce0dc';
+      ctx.fillText("状態を復元中...", sbX + SIDEBAR_WIDTH / 2, 275);
+    } else if (isAiTurn()) {
+      ctx.fillStyle = '#ffc800';
+      ctx.fillText("AIが思考中...", sbX + SIDEBAR_WIDTH / 2, 275);
+    } else {
+      ctx.fillText("盤面をクリックして配置", sbX + SIDEBAR_WIDTH / 2, 275);
+    }
+  } else if (gameState === STATE_ANIMATING) {
+    ctx.fillStyle = '#ffb400';
+    ctx.fillText("観測中...", sbX + SIDEBAR_WIDTH / 2, 275);
+  } else if (gameState === STATE_OBSERVED_WAIT) {
+    ctx.fillStyle = '#ffc800';
+    ctx.fillText("観測完了！結果確認...", sbX + SIDEBAR_WIDTH / 2, 275);
+  } else if (gameState === STATE_WIN_LINE) {
+    ctx.fillStyle = '#ff5050';
+    ctx.fillText("決着！ライン確認中...", sbX + SIDEBAR_WIDTH / 2, 275);
+  } else if (gameState === STATE_GAME_OVER) {
+    ctx.fillStyle = '#ff5050';
+    ctx.font = '16px sans-serif';
+    ctx.fillText("GAME OVER!", sbX + SIDEBAR_WIDTH / 2, 265);
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '13px sans-serif';
+    let resStr = "";
+    if (winner === 1) resStr = "黒 (P1) の勝利";
+    else if (winner === 2) resStr = (gameMode === MODE_QUANTUM_1P || gameMode === MODE_CLASSIC_1P) ? "AI (白) の勝利" : "白 (P2) の勝利";
+    else resStr = "引き分け (DRAW)";
+    ctx.fillText(resStr, sbX + SIDEBAR_WIDTH / 2, 290);
+
+    let retryHover = isMouseOver(sbX + 20, 330, 180, 38);
+    if (retryHover && !prevSidebarRetryHover) playHoverSE();
+    prevSidebarRetryHover = retryHover;
+
+    ctx.fillStyle = retryHover ? '#28b464' : '#1e8c50';
+    ctx.strokeStyle = 'rgba(255,100,100,0.39)';
+    ctx.lineWidth = 1;
+    roundRect(ctx, sbX + 20, 330, 180, 38, 6);
+    ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '13px sans-serif';
+    ctx.fillText("↺ もう一度遊ぶ", sbX + SIDEBAR_WIDTH / 2, 330 + 19);
+  } else {
+    prevSidebarRetryHover = false;
+  }
+
+  if (!isClassicMode() && (gameState === STATE_CHOICE || gameState === STATE_SHOW_RESULT)) {
+    drawSidebarOverlay(sbX);
+  }
+
+  let titleHover = isMouseOver(sbX + 20, HEIGHT - 52, 180, 40);
+  if (titleHover && !prevSidebarTitleHover) playHoverSE();
+  prevSidebarTitleHover = titleHover;
+
+  ctx.fillStyle = titleHover ? '#64738f' : '#465573';
+  ctx.strokeStyle = 'rgba(255,255,255,0.39)';
+  ctx.lineWidth = 1;
+  roundRect(ctx, sbX + 20, HEIGHT - 52, 180, 40, 6);
+  ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '13px sans-serif';
+  ctx.fillText("タイトルへ戻る", sbX + SIDEBAR_WIDTH / 2, HEIGHT - 52 + 20);
+}
+
+function drawSidebarOverlay(sbX) {
+  ctx.fillStyle = 'rgba(15, 22, 36, 0.96)';
+  ctx.fillRect(sbX, 0, SIDEBAR_WIDTH, HEIGHT - 60);
+
+  ctx.strokeStyle = 'rgba(0, 180, 255, 0.7)';
+  ctx.lineWidth = 2;
+  roundRect(ctx, sbX + 8, 8, SIDEBAR_WIDTH - 16, HEIGHT - 76, 8);
+  ctx.stroke();
+
+  if (gameState === STATE_CHOICE) {
+    ctx.fillStyle = '#00dcff';
+    ctx.font = '16px sans-serif';
+    ctx.fillText("【 観測 】", sbX + SIDEBAR_WIDTH / 2, 50);
+
+    if (gameMode === MODE_QUANTUM_1P && currentPlayer === 2) {
+      ctx.fillStyle = '#ffc800';
+      ctx.font = '13px sans-serif';
+      ctx.fillText("AIが観測を検討中...", sbX + SIDEBAR_WIDTH / 2, 130);
+    } else {
+      ctx.fillStyle = '#dce6fa';
+      ctx.font = '13px sans-serif';
+      ctx.fillText("量子状態を観測しますか？", sbX + SIDEBAR_WIDTH / 2, 85);
+      ctx.fillText("(エネルギーを1消費)", sbX + SIDEBAR_WIDTH / 2, 105);
+
+      drawOverlayButton(sbX + 20, 140, 180, 45, "▶ 観測する", '#1e605a', '#28d46e');
+      drawOverlayButton(sbX + 20, 200, 180, 45, "スキップ", '#465064', '#64738c');
+    }
+  } else if (gameState === STATE_SHOW_RESULT) {
+    ctx.fillStyle = '#ffb400';
+    ctx.font = '16px sans-serif';
+    ctx.fillText("【 観測結果 】", sbX + SIDEBAR_WIDTH / 2, 50);
+
+    ctx.fillStyle = '#dce6fa';
+    ctx.font = '13px sans-serif';
+    ctx.fillText("揃いませんでした", sbX + SIDEBAR_WIDTH / 2, 100);
+    ctx.fillText("(自動リトライ中)", sbX + SIDEBAR_WIDTH / 2, 130);
+
+    let progress = resultTimer / RESULT_DURATION;
+    ctx.fillStyle = '#283246';
+    roundRect(ctx, sbX + 30, 180, 160, 6, 3);
+    ctx.fill();
+    ctx.fillStyle = '#00c8ff';
+    roundRect(ctx, sbX + 30, 180, 160 * progress, 6, 3);
+    ctx.fill();
+  }
+}
+
+function drawOverlayButton(x, y, w, h, label, bg, hoverBg) {
+  let hover = isMouseOver(x, y, w, h);
+  if (hover && ((label === "▶ 観測する" && !prevOverlayBtn1) || (label === "スキップ" && !prevOverlayBtn2))) {
+    playHoverSE();
+  }
+  if (label === "▶ 観測する") prevOverlayBtn1 = hover;
+  if (label === "スキップ") prevOverlayBtn2 = hover;
+
+  ctx.fillStyle = hover ? hoverBg : bg;
+  ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+  ctx.lineWidth = hover ? 2 : 1;
+  roundRect(ctx, x, y, w, h, 6);
+  ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '13px sans-serif';
+  ctx.fillText(label, x + w / 2, y + h / 2);
+}
+
+function drawVictoryModal() {
+  ctx.fillStyle = 'rgba(10, 15, 25, 0.82)';
+  ctx.fillRect(0, 0, COLS * CELL_SIZE, HEIGHT);
+
+  let modalW = 340, modalH = 220;
+  let modalX = (COLS * CELL_SIZE - modalW) / 2.0;
+  let modalY = (HEIGHT - modalH) / 2.0;
+
+  ctx.fillStyle = '#141e30';
+  ctx.strokeStyle = '#00c8ff';
+  ctx.lineWidth = 2;
+  roundRect(ctx, modalX, modalY, modalW, modalH, 12);
+  ctx.fill(); ctx.stroke();
+
+  ctx.fillStyle = '#ffc800';
+  ctx.font = '22px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  if (winner === 0) ctx.fillText("★ DRAW (引き分け) ★", modalX + modalW / 2, modalY + 35);
+  else ctx.fillText("★ VICTORY! ★", modalX + modalW / 2, modalY + 35);
+
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '15px sans-serif';
+  if (winner === 1) {
+    ctx.fillText("PLAYER 1 (黒) の勝利！", modalX + modalW / 2, modalY + 70);
+  } else if (winner === 2) {
+    let wName = (gameMode === MODE_QUANTUM_1P || gameMode === MODE_CLASSIC_1P) ? "AI (白)" : "PLAYER 2 (白)";
+    ctx.fillText(wName + " の勝利！", modalX + modalW / 2, modalY + 70);
+  } else {
+    ctx.fillText("同時に同数のラインが完成しました！", modalX + modalW / 2, modalY + 70);
+  }
+
+  ctx.fillStyle = '#b4c8e6';
+  ctx.font = '12px sans-serif';
+  if (!isClassicMode()) {
+    ctx.fillText("【成立数】 黒: " + p1LineCount + " 本  /  白: " + p2LineCount + " 本", modalX + modalW / 2, modalY + 100);
+  } else {
+    ctx.fillText("5目並べ達成による勝利", modalX + modalW / 2, modalY + 100);
+  }
+
+  drawModalButton(modalX + 25, modalY + 145, 135, 42, "RETRY (再戦)", '#1ea05a', '#28d26e', 1);
+  drawModalButton(modalX + 180, modalY + 145, 135, 42, "TITLE (タイトル)", '#3c506e', '#50698c', 2);
+}
+
+function drawModalButton(x, y, w, h, label, bg, hoverBg, btnId) {
+  let hover = isMouseOver(x, y, w, h);
+  let wasHover = (btnId === 1) ? prevModalBtn1 : prevModalBtn2;
+  if (hover && !wasHover) playHoverSE();
+  if (btnId === 1) prevModalBtn1 = hover;
+  else prevModalBtn2 = hover;
+
+  ctx.fillStyle = hover ? hoverBg : bg;
+  ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+  ctx.lineWidth = hover ? 2 : 1;
+  roundRect(ctx, x, y, w, h, 6);
+  ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '13px sans-serif';
+  ctx.fillText(label, x + w / 2, y + h / 2);
+}
+
+function drawTopHeader() {
+  ctx.fillStyle = '#141923';
+  ctx.fillRect(0, 0, COLS * CELL_SIZE, OFFSET_Y);
+  ctx.fillStyle = '#dce6fa';
+  ctx.font = '17px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  let titleText = isClassicMode() ? "CLASSIC GOMOKU" : "QUANTUM GOMOKU";
+  ctx.fillText(titleText, (COLS * CELL_SIZE) / 2, OFFSET_Y / 2);
+}
+
+// 補助関数: 角丸矩形パス
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+// クリック判定制御
+function handleMousePressed() {
+  if (gameState === STATE_TITLE) {
+    if (showRules) {
+      let modalW = 500, modalH = 380;
+      let modalX = (WIDTH - modalW) / 2.0;
+      let modalY = (HEIGHT - modalH) / 2.0;
+      if (isMouseOver(modalX + modalW / 2 - 60, modalY + modalH - 35, 120, 30) || !isMouseOver(modalX, modalY, modalW, modalH)) {
+        playClickSE();
+        showRules = false;
+      }
+      return;
+    }
+
+    if (isMouseOver(WIDTH / 2 - 135, 195, 270, 45)) {
+      playClickSE();
+      gameMode = MODE_QUANTUM_1P; resetGame(); gameState = STATE_PLACE;
+    } else if (isMouseOver(WIDTH / 2 - 135, 250, 270, 45)) {
+      playClickSE();
+      gameMode = MODE_QUANTUM_2P; resetGame(); gameState = STATE_PLACE;
+    } else if (isMouseOver(WIDTH / 2 - 135, 320, 270, 45)) {
+      playClickSE();
+      gameMode = MODE_CLASSIC_1P; resetGame(); gameState = STATE_PLACE;
+    } else if (isMouseOver(WIDTH / 2 - 135, 375, 270, 45)) {
+      playClickSE();
+      gameMode = MODE_CLASSIC_2P; resetGame(); gameState = STATE_PLACE;
+    } else if (isMouseOver(WIDTH / 2 - 135, 440, 270, 38)) {
+      playClickSE();
+      showRules = true;
+    }
+    return;
+  }
+
+  let sbX = COLS * CELL_SIZE;
+  if (isMouseOver(sbX + 20, HEIGHT - 52, 180, 40)) {
+    playClickSE();
+    gameState = STATE_TITLE;
+    return;
+  }
+
+  if (gameState === STATE_ANIMATING || gameState === STATE_OBSERVED_WAIT || gameState === STATE_WIN_LINE) return;
+
+  if (gameState === STATE_SHOW_RESULT) {
+    if (isBoardFull()) return;
+    playClickSE();
+    finishTurn();
+    return;
+  }
+
+  if (gameState === STATE_GAME_OVER) {
+    let modalW = 340, modalH = 220;
+    let modalX = (COLS * CELL_SIZE - modalW) / 2.0;
+    let modalY = (HEIGHT - modalH) / 2.0;
+
+    if (isMouseOver(modalX + 25, modalY + 145, 135, 42)) {
+      playClickSE();
+      resetGame(); gameState = STATE_PLACE; return;
+    } else if (isMouseOver(modalX + 180, modalY + 145, 135, 42)) {
+      playClickSE();
+      gameState = STATE_TITLE; return;
+    }
+
+    if (isMouseOver(sbX + 20, 330, 180, 38)) {
+      playClickSE();
+      resetGame(); gameState = STATE_PLACE;
+    }
+    return;
+  }
+
+  if (isAiTurn()) return;
+  if (isBoardFull()) return;
+
+  if (!isClassicMode() && gameState === STATE_CHOICE) {
+    if (isMouseOver(sbX + 20, 140, 180, 45)) {
+      playClickSE();
+      startObservationAnimation(true);
+    } else if (isMouseOver(sbX + 20, 200, 180, 45)) {
+      playClickSE();
+      finishTurn();
+    }
+    return;
+  }
+
+  if (gameState === STATE_PLACE) {
+    if (transitionTimer > 0) return;
+
+    let gx = Math.floor(mouseX / CELL_SIZE);
+    let gy = Math.floor((mouseY - OFFSET_Y) / CELL_SIZE);
+
+    if (gx >= 0 && gx < COLS && gy >= 0 && gy < ROWS && mouseX < sbX) {
+      if (isClassicMode()) {
+        if (boardObserved[gx][gy] === 0) {
+          boardObserved[gx][gy] = currentPlayer;
+          ripples.push(new Ripple(gx * CELL_SIZE + CELL_SIZE/2.0, OFFSET_Y + gy * CELL_SIZE + CELL_SIZE/2.0));
+          playPlaceSE();
+
+          if (hasFiveInARowLine()) {
+            winner = currentPlayer;
+            winLines = [];
+            countAndRecordFiveInARow(currentPlayer);
+            p2LineCount = 1;
+            gameState = STATE_WIN_LINE;
+            winLineTimer = 0;
+          } else if (isBoardFull()) {
+            winner = 0;
+            gameState = STATE_WIN_LINE;
+            winLineTimer = 0;
+          } else {
+            finishTurn();
+          }
+        }
+      } else {
+        if (boardProb[gx][gy] < 0) {
+          boardProb[gx][gy] = currentProb;
+          ripples.push(new Ripple(gx * CELL_SIZE + CELL_SIZE/2.0, OFFSET_Y + gy * CELL_SIZE + CELL_SIZE/2.0));
+          playPlaceSE();
+
+          if (isBoardFull()) {
+            startObservationAnimation(false);
+          } else if (hasFiveInARowLine() && getCurrentPlayerEnergy() >= 1) {
+            gameState = STATE_CHOICE;
+          } else {
+            finishTurn();
+          }
+        }
+      }
+    }
+  }
+}
+
+// 起動
+setup();
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
